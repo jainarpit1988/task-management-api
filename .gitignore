@@ -1,0 +1,10 @@
+/.vs
+/src/TaskManagement.Api/bin
+/src/TaskManagement.Api/logs
+/src/TaskManagement.Api/obj
+/src/TaskManagement.Application/bin
+/src/TaskManagement.Application/obj
+/src/TaskManagement.Domain/bin
+/src/TaskManagement.Domain/obj
+/src/TaskManagement.Infrastructure/bin
+/src/TaskManagement.Infrastructure/obj
