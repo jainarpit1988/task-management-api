@@ -1,6 +1,8 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using TaskManagement.Application.Common;
+using TaskManagement.Application.DTOs;
+using TaskManagement.Application.DTOs.Admin;
 using TaskManagement.Application.DTOs.Agent;
 using TaskManagement.Application.DTOs.Common;
 using TaskManagement.Application.DTOs.Tasks;
@@ -17,6 +19,31 @@ public sealed class AgentController : ControllerBase
     private readonly IAgentService _agent;
 
     public AgentController(IAgentService agent) => _agent = agent;
+
+    [HttpGet("agents")]
+    [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status200OK)]
+    public async Task<ActionResult<ApiResponse<object>>> ListAgents(
+        [FromQuery] string? search,
+        [FromQuery] UserStatus? status,
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 20,
+        CancellationToken ct = default)
+    {
+        var result = await _agent.ListAgentsAsync(
+            new AgentListFilterDto { Search = search, Status = status },
+            new PaginationQueryDto { Page = page, PageSize = pageSize },
+            ct);
+
+        return Ok(ApiResponse<object>.Ok(result));
+    }
+
+    [HttpPut("tasks/reassign")]
+    [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status200OK)]
+    public async Task<ActionResult<ApiResponse<object>>> ReassignTasks([FromBody] AgentReassignTasksRequestDto request, CancellationToken ct)
+    {
+        await _agent.ReassignTasksAsync(request, ct);
+        return Ok(ApiResponse<object>.Ok(null, "Tasks reassigned"));
+    }
 
     [HttpGet("tasks")]
     [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status200OK)]
