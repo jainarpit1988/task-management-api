@@ -35,13 +35,6 @@ public sealed class AgentService : IAgentService
 
     public async Task<PagedResult<TaskListItemDto>> GetMyTasksAsync(AgentTaskFilterDto filter, PaginationQueryDto page, CancellationToken ct)
     {
-        if (!filter.FromDate.HasValue && !filter.ToDate.HasValue)
-        {
-            var today = DateOnly.FromDateTime(DateTime.UtcNow);
-            filter.FromDate = today;
-            filter.ToDate = today;
-        }
-
         var (items, total) = await _tasks.ListForAgentAsync(
             _currentUser.UserId,
             filter.FromDate,

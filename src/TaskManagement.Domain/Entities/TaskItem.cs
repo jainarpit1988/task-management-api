@@ -26,6 +26,8 @@ public class TaskItem : AuditableEntity
     public long? AssignedAgentId { get; set; } // maps to current_agent_id
     public User? AssignedAgent { get; set; }
 
+    public DateTime? DueDate { get; set; } // maps to due_date
+
     public long? LastUpdateId { get; set; } // maps to latest_followup_id
     public TaskUpdate? LastUpdate { get; set; }
 

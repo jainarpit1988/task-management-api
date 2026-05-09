@@ -16,6 +16,7 @@ public sealed class TaskListItemDto
     public string? Phone => MobileNo;
 
     public long? AssignedAgentId { get; set; }
+    public DateTime? DueDate { get; set; }
     public TaskStatus Status { get; set; }
     public bool Acknowledged { get; set; }
     public DateTime? AcknowledgedAt { get; set; }

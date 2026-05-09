@@ -106,6 +106,7 @@ public sealed class AppDbContext : DbContext
 
             e.Property(x => x.Status).HasColumnName("current_status").HasConversion<string>().IsRequired();
             e.Property(x => x.AssignedAgentId).HasColumnName("current_agent_id");
+            e.Property(x => x.DueDate).HasColumnName("due_date");
             e.Property(x => x.LastUpdateId).HasColumnName("latest_followup_id");
             e.Property(x => x.Acknowledged).HasColumnName("acknowledged");
             e.Property(x => x.AcknowledgedAt).HasColumnName("acknowledged_at");

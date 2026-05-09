@@ -18,6 +18,7 @@ public sealed class TaskDetailsDto
     public string? CustomerAddress { get; set; }
 
     public long? AssignedAgentId { get; set; }
+    public DateTime? DueDate { get; set; }
 
     public TaskStatus Status { get; set; }
     public long? LastUpdateId { get; set; }

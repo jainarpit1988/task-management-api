@@ -258,12 +258,47 @@ public sealed class AdminService : IAdminService
                 var dimRows = ws.Dimension?.Rows ?? 0;
                 var dimCols = ws.Dimension?.Columns ?? 0;
 
-                // EPPlus Dimension can be huge due to formatting; find last actual data row by scanning A-K.
+                static string NormHeader(string? s)
+                {
+                    if (string.IsNullOrWhiteSpace(s)) return string.Empty;
+                    return string.Concat(s.Trim().Where(ch => !char.IsWhiteSpace(ch))).ToLowerInvariant();
+                }
+
+                var headerToCol = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                var headerLastCol = 0;
+                for (var c = 1; c <= dimCols; c++)
+                {
+                    var h = ws.Cells[1, c].Text;
+                    if (string.IsNullOrWhiteSpace(h)) break;
+                    headerLastCol = c;
+                    var key = NormHeader(h);
+                    if (!string.IsNullOrEmpty(key) && !headerToCol.ContainsKey(key))
+                        headerToCol[key] = c;
+                }
+
+                int? Col(params string[] names)
+                {
+                    foreach (var n in names)
+                    {
+                        var key = NormHeader(n);
+                        if (headerToCol.TryGetValue(key, out var col))
+                            return col;
+                    }
+                    return null;
+                }
+
+                string Cell(int row, int? col)
+                {
+                    if (!col.HasValue) return string.Empty;
+                    return ws.Cells[row, col.Value].Text;
+                }
+
+                // EPPlus Dimension can be huge due to formatting; find last actual data row by scanning used headers.
                 var lastDataRow = 1;
                 if (dimRows > 1)
                 {
                     var end = dimRows;
-                    const int maxCols = 11; // A-K
+                    var maxCols = headerLastCol > 0 ? headerLastCol : Math.Min(dimCols, 12);
                     for (var r = end; r >= 2; r--)
                     {
                         var hasAny = false;
@@ -298,6 +333,22 @@ public sealed class AdminService : IAdminService
                 const int batchSize = 500;
                 var taskBatch = new List<TaskItem>(batchSize);
                 var errorBatch = new List<ExcelUploadError>(batchSize);
+                var agentEmailCache = new Dictionary<string, long?>(StringComparer.OrdinalIgnoreCase);
+
+                async Task<long?> ResolveAgentIdByEmailAsync(string email)
+                {
+                    if (string.IsNullOrWhiteSpace(email)) return null;
+                    var normalized = email.Trim();
+                    if (agentEmailCache.TryGetValue(normalized, out var cached)) return cached;
+
+                    var id = await _db.Users.AsNoTracking()
+                        .Where(u => !u.IsDeleted && u.Role == UserRole.AGENT && u.Email != null && u.Email == normalized)
+                        .Select(u => (long?)u.Id)
+                        .FirstOrDefaultAsync(ct);
+
+                    agentEmailCache[normalized] = id;
+                    return id;
+                }
 
                 async Task FlushErrorsAsync()
                 {
@@ -362,6 +413,22 @@ public sealed class AdminService : IAdminService
                             {
                                 await _tasks.AddRangeAsync(taskBatch, innerCt);
                                 await _tasks.SaveChangesAsync(innerCt);
+
+                                var assigned = taskBatch.Where(t => t.AssignedAgentId.HasValue).ToList();
+                                if (assigned.Count > 0)
+                                {
+                                    var assignedAt = DateTime.UtcNow;
+                                    var rows = assigned.Select(t => new TaskAssignment
+                                    {
+                                        TaskId = t.Id,
+                                        AgentId = t.AssignedAgentId!.Value,
+                                        AssignedBy = upload.UploadedBy,
+                                        AssignedAt = assignedAt
+                                    }).ToList();
+
+                                    await _assignments.AddRangeAsync(rows, innerCt);
+                                    await _tasks.SaveChangesAsync(innerCt);
+                                }
                             },
                             _logger,
                             op: "save_task_batch",
@@ -389,6 +456,18 @@ public sealed class AdminService : IAdminService
                                     {
                                         await _db.Tasks.AddAsync(t, innerCt);
                                         await _db.SaveChangesAsync(innerCt);
+
+                                        if (t.AssignedAgentId.HasValue)
+                                        {
+                                            await _db.TaskAssignments.AddAsync(new TaskAssignment
+                                            {
+                                                TaskId = t.Id,
+                                                AgentId = t.AssignedAgentId.Value,
+                                                AssignedBy = upload.UploadedBy,
+                                                AssignedAt = DateTime.UtcNow
+                                            }, innerCt);
+                                            await _db.SaveChangesAsync(innerCt);
+                                        }
                                     },
                                     _logger,
                                     op: "save_task_row",
@@ -419,20 +498,30 @@ public sealed class AdminService : IAdminService
                 {
                     try
                     {
-                        // A-K mapping:
-                        // A: InternalId
-                        // B: Hub -> hub_name
-                        // C: Application Number -> application_no
-                        // D: Customer Name -> customer_name
-                        // E: Entity Name -> entity_name
-                        // F: Loan Type -> loan_type
-                        // G: Loan Amount -> loan_amount
-                        // H: Address -> customer_address
-                        // I: Location -> location
-                        // J: Hub -> branch_hub
-                        // K: Mobile NO -> mobile_no
+                        // Header-based mapping (supports varying Excel formats).
+                        var srNo = NullIfBlank(Cell(row, Col("Sr No", "SrNo", "Sr. No", "SR NO", "Sr_No")));
+                        var hubName = Trunc(NullIfBlank(Cell(row, Col("Hub", "HubName", "HUB"))), 100);
+                        var appNo = Trunc(NullIfBlank(Cell(row, Col("Application Number", "ApplicationNo", "Application No", "Application"))), 100);
+                        var customerName = Trunc(NullIfBlank(Cell(row, Col("Customer Name", "CustomerName"))), 255);
+                        var entityName = Trunc(NullIfBlank(Cell(row, Col("Entity Name", "EntityName"))), 255);
+                        var loanType = Trunc(NullIfBlank(Cell(row, Col("Loan Type", "LoanType"))), 100);
+                        var loanAmount = ParseDecimalOrNull(Cell(row, Col("Loan amount", "Loan Amount", "LoanAmount")));
+                        var customerAddress = NullIfBlank(Cell(row, Col("Address", "Customer Address", "CustomerAddress")));
+                        var location = Trunc(NullIfBlank(Cell(row, Col("Location"))), 255);
+                        var branchHub = Trunc(NullIfBlank(Cell(row, Col("Branch Hub", "BranchHub"))), 100);
+                        var mobileNo = Trunc(NullIfBlank(Cell(row, Col("Mobile No", "MobileNo", "Mobile"))), 20);
+                        var agentEmail = Trunc(NullIfBlank(Cell(row, Col("Agent Email", "AgentEmail"))), 150);
 
-                        var internalId = NullIfBlank(ws.Cells[row, 1].Text);
+                        // InternalId rules:
+                        // - Prefer explicit InternalId column if present
+                        // - Else fall back to Application Number (usually unique)
+                        // - Else fall back to Sr No
+                        // - Else generate stable fallback
+                        var internalId =
+                            NullIfBlank(Cell(row, Col("InternalId", "Internal Id", "Internal"))) ??
+                            appNo ??
+                            srNo;
+
                         if (internalId is not null && internalId.Length > 50)
                             internalId = internalId[..50];
 
@@ -440,16 +529,35 @@ public sealed class AdminService : IAdminService
                         // This avoids "failed records" while keeping uniqueness.
                         internalId ??= $"U{upload.Id:D6}R{row:D6}";
 
-                        var hubName = Trunc(NullIfBlank(ws.Cells[row, 2].Text), 100);
-                        var appNo = Trunc(NullIfBlank(ws.Cells[row, 3].Text), 100);
-                        var customerName = Trunc(NullIfBlank(ws.Cells[row, 4].Text), 255);
-                        var entityName = Trunc(NullIfBlank(ws.Cells[row, 5].Text), 255);
-                        var loanType = Trunc(NullIfBlank(ws.Cells[row, 6].Text), 100);
-                        var loanAmount = ParseDecimalOrNull(ws.Cells[row, 7].Text);
-                        var customerAddress = NullIfBlank(ws.Cells[row, 8].Text);
-                        var location = Trunc(NullIfBlank(ws.Cells[row, 9].Text), 255);
-                        var branchHub = Trunc(NullIfBlank(ws.Cells[row, 10].Text), 100);
-                        var mobileNo = Trunc(NullIfBlank(ws.Cells[row, 11].Text), 20);
+                        long? resolvedAgentId = null;
+                        if (!string.IsNullOrWhiteSpace(agentEmail))
+                        {
+                            resolvedAgentId = await ResolveAgentIdByEmailAsync(agentEmail);
+                            if (!resolvedAgentId.HasValue)
+                            {
+                                upload.FailedRows++;
+                                errorBatch.Add(new ExcelUploadError
+                                {
+                                    UploadId = upload.Id,
+                                    ExcelRowNumber = row,
+                                    ErrorMessage = $"Agent not found for email: {agentEmail}",
+                                    RawData = JsonSerializer.Serialize(new
+                                    {
+                                        row,
+                                        agentEmail,
+                                        internalId,
+                                        applicationNo = appNo,
+                                        customerName,
+                                        mobileNo
+                                    })
+                                });
+
+                                if (errorBatch.Count >= batchSize)
+                                    await FlushErrorsAsync();
+
+                                continue;
+                            }
+                        }
 
                         // Requirement: if Customer Name is blank, skip row (do not insert).
                         if (customerName is null)
@@ -495,7 +603,8 @@ public sealed class AdminService : IAdminService
                             ["CustomerAddress"] = customerAddress,
                             ["Location"] = location,
                             ["BranchHub"] = branchHub,
-                            ["MobileNo"] = mobileNo
+                            ["MobileNo"] = mobileNo,
+                            ["AgentEmail"] = agentEmail
                         };
 
                         taskBatch.Add(new TaskItem
@@ -512,6 +621,7 @@ public sealed class AdminService : IAdminService
                             Location = location,
                             BranchHub = branchHub,
                             MobileNo = mobileNo,
+                            AssignedAgentId = resolvedAgentId,
                             Status = TaskStatus.NEW,
                             RawData = JsonSerializer.Serialize(rawObj),
                             CreatedFromUploadId = upload.Id
