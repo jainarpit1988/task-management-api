@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Mvc;
 using TaskManagement.Application.Common;
 using TaskManagement.Application.DTOs.Agent;
 using TaskManagement.Application.DTOs.Common;
+using TaskManagement.Application.DTOs.Tasks;
 using TaskManagement.Application.Interfaces;
 using TaskManagement.Domain.Enums;
 
@@ -58,6 +59,15 @@ public sealed class AgentController : ControllerBase
     {
         var update = await _agent.AddUpdateAsync(id, request, ct);
         return Ok(ApiResponse<object>.Ok(update, "Update added"));
+    }
+
+    [HttpGet("tasks/{id:long}")]
+    [ProducesResponseType(typeof(ApiResponse<TaskDetailsDto>), StatusCodes.Status200OK)]
+    public async Task<ActionResult<ApiResponse<TaskDetailsDto>>> GetTaskDetails([FromRoute] long id, CancellationToken ct)
+    {
+        // Same payload as admin details; still enforces "own task" access.
+        var result = await _agent.GetTaskHistoryAsync(id, ct);
+        return Ok(ApiResponse<TaskDetailsDto>.Ok(result));
     }
 
     [HttpGet("tasks/{id:long}/history")]
