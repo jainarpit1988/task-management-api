@@ -38,6 +38,12 @@ public sealed class ExceptionMiddleware
             statusCode = appEx.StatusCode;
             message = appEx.Message;
         }
+        else
+        {
+            // Expose base exception message to speed up diagnosing schema/runtime issues in deployed envs.
+            // This API is used by trusted clients; without this, we only get a generic 500 on mobile.
+            message = ex.GetBaseException().Message;
+        }
 
         var userId = context.User?.Claims?.FirstOrDefault(c => c.Type == "sub")?.Value
                      ?? context.User?.Identity?.Name

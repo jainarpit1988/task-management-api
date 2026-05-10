@@ -22,7 +22,7 @@ public class TaskItem : AuditableEntity
     public string? MobileNo { get; set; }
 
     // Current task state
-    public TaskStatus Status { get; set; } = TaskStatus.OPEN; // maps to current_status
+    public TaskStatus Status { get; set; } = TaskStatus.NEW; // maps to current_status
     public long? AssignedAgentId { get; set; } // maps to current_agent_id
     public User? AssignedAgent { get; set; }
 

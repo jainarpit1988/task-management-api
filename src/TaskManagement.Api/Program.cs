@@ -8,6 +8,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
 using System.Data;
+using System.Text.Json.Serialization;
 using Serilog;
 using TaskManagement.Application.Mapping;
 using TaskManagement.Infrastructure;
@@ -45,7 +46,13 @@ builder.Services.Configure<IISServerOptions>(o =>
     o.MaxRequestBodySize = maxUploadBytes;
 });
 
-builder.Services.AddControllers();
+builder.Services.AddControllers()
+    .AddJsonOptions(o =>
+    {
+        // Send/receive enums as strings to avoid UI-index -> enum-number mismatches
+        // (e.g., "In Progress" being sent as 2 and parsed as VISITED).
+        o.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter(allowIntegerValues: false));
+    });
 builder.Services.AddHostedService<ExcelUploadWorker>();
 
 // AutoMapper
@@ -213,6 +220,231 @@ using (var scope = app.Services.CreateScope())
         }
     }
 
+    async Task EnsureTaskCurrentStatusEnumIsCompatibleAsync()
+    {
+        try
+        {
+            await db.Database.OpenConnectionAsync();
+            await using var cmd = db.Database.GetDbConnection().CreateCommand();
+            cmd.CommandType = CommandType.Text;
+            cmd.CommandText = """
+                              SELECT COLUMN_TYPE
+                              FROM information_schema.COLUMNS
+                              WHERE TABLE_SCHEMA = DATABASE()
+                                AND TABLE_NAME = 'tasks'
+                                AND COLUMN_NAME = 'current_status'
+                              LIMIT 1
+                              """;
+
+            var scalar = await cmd.ExecuteScalarAsync();
+            var columnType = (scalar?.ToString()) ?? string.Empty;
+
+            // If it's not an enum, there's nothing to patch here.
+            if (!columnType.StartsWith("enum(", StringComparison.OrdinalIgnoreCase))
+                return;
+
+            // We persist TaskStatus as strings; these must be accepted by the DB enum.
+            // Keep the legacy values the app uses (NEW/PENDING/...) to avoid "Data truncated".
+            var required = new[]
+            {
+                "NEW",
+                "PENDING",
+                "VISITED",
+                "NOT_INTERESTED",
+                "CONVERTED",
+                "FOLLOW_UP_REQUIRED",
+                "CLOSED"
+            };
+
+            var missing = required.Where(v => !columnType.Contains($"'{v}'", StringComparison.OrdinalIgnoreCase)).ToList();
+            if (missing.Count == 0)
+                return;
+
+            logger.LogWarning(
+                "DB schema drift detected. Updating tasks.current_status enum to include required values. missing={Missing} current={ColumnType}",
+                string.Join(",", missing),
+                columnType);
+
+            // Expand/normalize enum list to required set (order doesn't matter for enum type).
+            var enumSql = "enum(" + string.Join(",", required.Select(v => $"'{v}'")) + ")";
+
+#pragma warning disable EF1002
+            await db.Database.ExecuteSqlRawAsync(
+                $"ALTER TABLE `tasks` MODIFY COLUMN `current_status` {enumSql} COLLATE utf8mb3_unicode_ci NOT NULL DEFAULT 'NEW';");
+#pragma warning restore EF1002
+
+            logger.LogInformation("Updated tasks.current_status enum for compatibility");
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Failed ensuring tasks.current_status enum is compatible");
+        }
+        finally
+        {
+            try { await db.Database.CloseConnectionAsync(); } catch { /* ignore */ }
+        }
+    }
+
+    async Task EnsureAutoIncrementAsync(string table, string idColumn = "id")
+    {
+        try
+        {
+            await db.Database.OpenConnectionAsync();
+
+            // 1) Ensure the PK column is AUTO_INCREMENT (DB drift safety).
+            await using (var cmd = db.Database.GetDbConnection().CreateCommand())
+            {
+                cmd.CommandType = CommandType.Text;
+                cmd.CommandText = """
+                                  SELECT EXTRA
+                                  FROM information_schema.COLUMNS
+                                  WHERE TABLE_SCHEMA = DATABASE()
+                                    AND TABLE_NAME = @table
+                                    AND COLUMN_NAME = @column
+                                  LIMIT 1
+                                  """;
+
+                var pTable = cmd.CreateParameter();
+                pTable.ParameterName = "@table";
+                pTable.Value = table;
+                cmd.Parameters.Add(pTable);
+
+                var pColumn = cmd.CreateParameter();
+                pColumn.ParameterName = "@column";
+                pColumn.Value = idColumn;
+                cmd.Parameters.Add(pColumn);
+
+                var extra = (await cmd.ExecuteScalarAsync())?.ToString() ?? string.Empty;
+                if (!extra.Contains("auto_increment", StringComparison.OrdinalIgnoreCase))
+                {
+                    logger.LogWarning("DB schema drift detected. Enabling AUTO_INCREMENT on {Table}.{Column}. extra={Extra}", table, idColumn, extra);
+#pragma warning disable EF1002
+                    await db.Database.ExecuteSqlRawAsync($"ALTER TABLE `{table}` MODIFY COLUMN `{idColumn}` BIGINT NOT NULL AUTO_INCREMENT;"); // table/column are internal constants
+#pragma warning restore EF1002
+                    logger.LogInformation("Enabled AUTO_INCREMENT on {Table}.{Column}", table, idColumn);
+                }
+            }
+
+            // 2) Ensure AUTO_INCREMENT counter is ahead of MAX(id) to avoid duplicate PK inserts.
+            long maxId;
+            await using (var cmdMax = db.Database.GetDbConnection().CreateCommand())
+            {
+                cmdMax.CommandType = CommandType.Text;
+                cmdMax.CommandText = $"SELECT IFNULL(MAX(`{idColumn}`), 0) FROM `{table}`;";
+                var scalar = await cmdMax.ExecuteScalarAsync();
+                maxId = Convert.ToInt64(scalar);
+            }
+
+            long? nextAuto;
+            await using (var cmdAuto = db.Database.GetDbConnection().CreateCommand())
+            {
+                cmdAuto.CommandType = CommandType.Text;
+                cmdAuto.CommandText = """
+                                       SELECT AUTO_INCREMENT
+                                       FROM information_schema.TABLES
+                                       WHERE TABLE_SCHEMA = DATABASE()
+                                         AND TABLE_NAME = @table
+                                       LIMIT 1
+                                       """;
+
+                var pTable2 = cmdAuto.CreateParameter();
+                pTable2.ParameterName = "@table";
+                pTable2.Value = table;
+                cmdAuto.Parameters.Add(pTable2);
+
+                var scalar = await cmdAuto.ExecuteScalarAsync();
+                nextAuto = scalar == null || scalar == DBNull.Value ? null : Convert.ToInt64(scalar);
+            }
+
+            // If info_schema doesn't expose it (rare), we can't repair safely here.
+            if (nextAuto.HasValue && nextAuto.Value <= maxId)
+            {
+                var bumpTo = maxId + 1;
+                logger.LogWarning(
+                    "DB AUTO_INCREMENT drift detected. Bumping {Table} AUTO_INCREMENT from {AutoInc} to {BumpTo} (maxId={MaxId})",
+                    table, nextAuto.Value, bumpTo, maxId);
+
+#pragma warning disable EF1002
+                await db.Database.ExecuteSqlRawAsync($"ALTER TABLE `{table}` AUTO_INCREMENT = {bumpTo};"); // table is internal constant; bumpTo is computed server-side
+#pragma warning restore EF1002
+                logger.LogInformation("Bumped {Table} AUTO_INCREMENT to {BumpTo}", table, bumpTo);
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Failed ensuring AUTO_INCREMENT correctness for {Table}.{Column}", table, idColumn);
+        }
+        finally
+        {
+            try { await db.Database.CloseConnectionAsync(); } catch { /* ignore */ }
+        }
+    }
+
+    async Task EnsureTaskUpdatesCompatibilityAsync()
+    {
+        try
+        {
+            await db.Database.OpenConnectionAsync();
+
+            async Task<bool> TableOrViewExistsAsync(string name)
+            {
+                await using var cmd = db.Database.GetDbConnection().CreateCommand();
+                cmd.CommandType = CommandType.Text;
+                cmd.CommandText = """
+                                  SELECT COUNT(*)
+                                  FROM information_schema.TABLES
+                                  WHERE TABLE_SCHEMA = DATABASE()
+                                    AND TABLE_NAME = @name
+                                  """;
+                var p = cmd.CreateParameter();
+                p.ParameterName = "@name";
+                p.Value = name;
+                cmd.Parameters.Add(p);
+                var scalar = await cmd.ExecuteScalarAsync();
+                return Convert.ToInt64(scalar) > 0;
+            }
+
+            var hasTaskUpdates = await TableOrViewExistsAsync("task_updates");
+            if (hasTaskUpdates)
+                return;
+
+            var hasTaskFollowups = await TableOrViewExistsAsync("task_followups");
+            if (!hasTaskFollowups)
+                return;
+
+            logger.LogWarning("DB schema drift detected. Creating view task_updates over task_followups for compatibility.");
+
+            // Create an updatable view so EF (mapped to task_updates) can read/write.
+            // Map: comments -> comment
+#pragma warning disable EF1002
+            await db.Database.ExecuteSqlRawAsync("""
+                                                 CREATE OR REPLACE VIEW `task_updates` AS
+                                                 SELECT
+                                                     `id`,
+                                                     `task_id`,
+                                                     `agent_id`,
+                                                     `status`,
+                                                     `comments` AS `comment`,
+                                                     `meeting_person_name`,
+                                                     `meeting_person_mobile`,
+                                                     `followup_date`,
+                                                     `created_at`
+                                                 FROM `task_followups`;
+                                                 """);
+#pragma warning restore EF1002
+
+            logger.LogInformation("Created view task_updates for compatibility");
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Failed ensuring task_updates/task_followups compatibility");
+        }
+        finally
+        {
+            try { await db.Database.CloseConnectionAsync(); } catch { /* ignore */ }
+        }
+    }
+
     // Minimum fix for current 500: excel_uploads.updated_at is missing in prod.
     // Keep nullable to be safe across existing rows.
     await EnsureColumnAsync(
@@ -221,6 +453,9 @@ using (var scope = app.Services.CreateScope())
         ddl: "ALTER TABLE `excel_uploads` ADD COLUMN `updated_at` datetime(6) NULL;");
 
     await EnsureExcelUploadStatusEnumHasQueuedAsync();
+    await EnsureAutoIncrementAsync(table: "excel_uploads", idColumn: "id");
+    await EnsureTaskCurrentStatusEnumIsCompatibleAsync();
+    await EnsureTaskUpdatesCompatibilityAsync();
 
     // Recovery: if the app recycles mid-processing, re-enqueue stuck uploads.
     try

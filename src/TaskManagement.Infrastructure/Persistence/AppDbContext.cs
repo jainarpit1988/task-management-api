@@ -138,30 +138,31 @@ public sealed class AppDbContext : DbContext
 
         modelBuilder.Entity<TaskUpdate>(e =>
         {
-            // New schema: task updates are stored in task_followups
-            e.ToTable("task_followups");
+            // Task updates are stored in task_updates (legacy schema used by current DB.sql).
+            // Keep mapping compatible with the columns that exist in production.
+            e.ToTable("task_updates");
             e.HasKey(x => x.Id);
             e.Property(x => x.Id).HasColumnName("id");
             e.Property(x => x.TaskId).HasColumnName("task_id");
             e.Property(x => x.AgentId).HasColumnName("agent_id");
             e.Property(x => x.Status).HasColumnName("status").HasConversion<string>().IsRequired();
-            e.Property(x => x.Comment).HasColumnName("comments");
+            e.Property(x => x.Comment).HasColumnName("comment");
 
-            e.Property(x => x.VisitDate).HasColumnName("visit_date").HasConversion<DateOnlyConverter, DateOnlyComparer>();
             e.Property(x => x.MeetingPersonMobile).HasColumnName("meeting_person_mobile").HasMaxLength(20);
             e.Property(x => x.FollowupDate).HasColumnName("followup_date").HasConversion<DateOnlyConverter, DateOnlyComparer>();
-            e.Property(x => x.NextFollowupDate).HasColumnName("next_followup_date").HasConversion<DateOnlyConverter, DateOnlyComparer>();
-
             e.Property(x => x.MeetingPersonName).HasColumnName("meeting_person_name").HasMaxLength(255);
-            e.Property(x => x.FollowupNotes).HasColumnName("followup_notes");
-
-            e.Property(x => x.Latitude).HasColumnName("latitude").HasColumnType("decimal(10,8)");
-            e.Property(x => x.Longitude).HasColumnName("longitude").HasColumnType("decimal(11,8)");
-            e.Property(x => x.AttachmentUrl).HasColumnName("attachment_url").HasMaxLength(500);
 
             e.Property(x => x.CreatedAt).HasColumnName("created_at");
-            // DB table has no updated_at column
+            // DB.sql table has no updated_at column; some envs may, but it's not required.
             e.Ignore(x => x.UpdatedAt);
+
+            // Columns not present in DB.sql (safe to ignore for compatibility).
+            e.Ignore(x => x.VisitDate);
+            e.Ignore(x => x.NextFollowupDate);
+            e.Ignore(x => x.FollowupNotes);
+            e.Ignore(x => x.Latitude);
+            e.Ignore(x => x.Longitude);
+            e.Ignore(x => x.AttachmentUrl);
 
             e.HasOne(x => x.Task)
                 .WithMany(t => t.Updates)

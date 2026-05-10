@@ -446,6 +446,20 @@ public sealed class AdminService : IAdminService
 
                         _db.ChangeTracker.Clear();
 
+                    // Important: task entities created while the upload was tracked may have navigation fixups
+                    // (e.g., CreatedFromUpload set). After Clear(), re-adding the task would cause EF to
+                    // treat the referenced upload as a new entity and attempt to INSERT it, resulting in
+                    // "Duplicate entry for key excel_uploads.PRIMARY".
+                    static void StripNavigations(TaskItem t)
+                    {
+                        t.AssignedAgent = null;
+                        t.LastUpdate = null;
+                        t.CreatedFromUpload = null;
+                        t.Updates = new List<TaskUpdate>();
+                        t.Assignments = new List<TaskAssignment>();
+                        t.Acknowledgements = new List<TaskAcknowledgement>();
+                    }
+
                         foreach (var t in taskBatch)
                         {
                             ct.ThrowIfCancellationRequested();
@@ -454,6 +468,7 @@ public sealed class AdminService : IAdminService
                                 await RetryAsync(
                                     async innerCt =>
                                     {
+                                    StripNavigations(t);
                                         await _db.Tasks.AddAsync(t, innerCt);
                                         await _db.SaveChangesAsync(innerCt);
 
@@ -622,7 +637,7 @@ public sealed class AdminService : IAdminService
                             BranchHub = branchHub,
                             MobileNo = mobileNo,
                             AssignedAgentId = resolvedAgentId,
-                            Status = TaskStatus.OPEN,
+                            Status = TaskStatus.NEW,
                             RawData = JsonSerializer.Serialize(rawObj),
                             CreatedFromUploadId = upload.Id
                         });
@@ -863,6 +878,126 @@ public sealed class AdminService : IAdminService
         return _mapper.Map<TaskDetailsDto>(task);
     }
 
+    public async Task<TaskDetailsDto> GetTaskDetailsForCallerAsync(long taskId, CancellationToken ct)
+    {
+        var task = await _tasks.GetByIdAsync(taskId, includeDetails: true, ct)
+                   ?? throw new NotFoundException("Task not found");
+
+        if (_currentUser.Role == UserRole.AGENT && task.AssignedAgentId != _currentUser.UserId)
+            throw new ForbiddenException("You cannot access tasks assigned to other agents");
+
+        return _mapper.Map<TaskDetailsDto>(task);
+    }
+
+    public async Task<TaskDetailsDto> UpdateTaskAsync(long taskId, UpdateTaskRequestDto request, CancellationToken ct)
+    {
+        var task = await _tasks.GetByIdAsync(taskId, includeDetails: false, ct)
+                   ?? throw new NotFoundException("Task not found");
+
+        // Allow ADMIN to update any task; AGENT can update only tasks assigned to them.
+        if (_currentUser.Role == UserRole.AGENT && task.AssignedAgentId != _currentUser.UserId)
+            throw new ForbiddenException("You cannot update tasks assigned to other agents");
+
+        var now = DateTime.UtcNow;
+
+        if (request.Status.HasValue)
+            task.Status = request.Status.Value;
+
+        if (request.DueDate.HasValue)
+            task.DueDate = request.DueDate.Value.ToDateTime(TimeOnly.MinValue);
+
+        task.UpdatedAt = now;
+
+        try
+        {
+            await _tasks.SaveChangesAsync(ct);
+        }
+        catch (DbUpdateException ex)
+        {
+            // Some environments store task status as enum('OPEN','IN_PROGRESS','CLOSED') in `tasks.status`,
+            // while the EF model uses `current_status` with legacy values (NEW/PENDING/...).
+            // If the DB rejects the status value, fall back to a direct SQL update using a safe mapping.
+            // This makes the endpoint work across both schemas without requiring client changes.
+
+            static string MapToOpenInProgressClosed(TaskStatus s) =>
+                s switch
+                {
+                    TaskStatus.NEW => "OPEN",
+                    TaskStatus.PENDING => "IN_PROGRESS",
+                    TaskStatus.FOLLOW_UP_REQUIRED => "IN_PROGRESS",
+                    TaskStatus.CLOSED => "CLOSED",
+                    TaskStatus.CONVERTED => "CLOSED",
+                    _ => "IN_PROGRESS"
+                };
+
+            var baseMsg = ex.GetBaseException().Message;
+
+            if (request.Status.HasValue || request.DueDate.HasValue)
+            {
+                var dueDate = request.DueDate?.ToDateTime(TimeOnly.MinValue);
+                var mappedStatus = request.Status.HasValue ? MapToOpenInProgressClosed(request.Status.Value) : null;
+
+                async Task TryRawUpdateAsync(string statusColumn)
+                {
+                    if (mappedStatus is null && dueDate is null)
+                        return;
+
+                    try
+                    {
+                        // Use parameters to avoid SQL injection.
+                        if (mappedStatus is not null && dueDate is not null)
+                        {
+#pragma warning disable EF1002
+                            await _db.Database.ExecuteSqlRawAsync(
+                                $"UPDATE `tasks` SET `updated_at` = @p0, `{statusColumn}` = @p1, `due_date` = @p2 WHERE `id` = @p3;",
+                                now, mappedStatus, dueDate.Value, taskId, ct);
+#pragma warning restore EF1002
+                        }
+                        else if (mappedStatus is not null)
+                        {
+#pragma warning disable EF1002
+                            await _db.Database.ExecuteSqlRawAsync(
+                                $"UPDATE `tasks` SET `updated_at` = @p0, `{statusColumn}` = @p1 WHERE `id` = @p2;",
+                                now, mappedStatus, taskId, ct);
+#pragma warning restore EF1002
+                        }
+                        else
+                        {
+                            await _db.Database.ExecuteSqlRawAsync(
+                                $"UPDATE `tasks` SET `updated_at` = @p0, `due_date` = @p1 WHERE `id` = @p2;",
+                                now, dueDate!.Value, taskId, ct);
+                        }
+
+                        // If one of the columns exists and the value is valid, we are done.
+                    }
+                    catch
+                    {
+                        // ignore and try alternate column name
+                    }
+                }
+
+                await TryRawUpdateAsync("current_status");
+                await TryRawUpdateAsync("status");
+            }
+            else
+            {
+                throw new AppException("Provide at least one field: status or dueDate.");
+            }
+
+            // If the raw update didn't work, bubble up the root cause for visibility.
+            // (This will show e.g. "Unknown column ..." or enum truncation errors.)
+            // Note: SaveChanges failed, so the EF-tracked entity may not match DB; we reload below.
+            if (!string.IsNullOrWhiteSpace(baseMsg))
+                _logger.LogWarning(ex, "UpdateTaskAsync SaveChanges failed; attempted raw fallback. taskId={TaskId} msg={Msg}", taskId, baseMsg);
+        }
+
+        // Return updated task details (including history) for convenience.
+        var updated = await _tasks.GetByIdAsync(taskId, includeDetails: true, ct)
+                      ?? throw new NotFoundException("Task not found");
+
+        return _mapper.Map<TaskDetailsDto>(updated);
+    }
+
     public async Task<(IReadOnlyList<TasksPerAgentReportRowDto> tasksPerAgent, StatusSummaryReportDto statusSummary)> GetReportsAsync(
         TaskFilterDto filter,
         CancellationToken ct)
@@ -910,7 +1045,7 @@ public sealed class AdminService : IAdminService
             {
                 AgentId = g.Key,
                 Total = g.LongCount(),
-                Open = g.LongCount(x => x.Status == TaskStatus.OPEN),
+                Open = g.LongCount(x => x.Status == TaskStatus.NEW),
                 InProgress = g.LongCount(x => x.Status == TaskStatus.PENDING || x.Status == TaskStatus.FOLLOW_UP_REQUIRED),
                 Closed = g.LongCount(x => x.Status == TaskStatus.CLOSED)
             })

@@ -23,6 +23,8 @@ public interface IAdminService
 
     Task<PagedResult<TaskListItemDto>> GetTasksAsync(TaskFilterDto filter, PaginationQueryDto page, CancellationToken ct);
     Task<TaskDetailsDto> GetTaskDetailsAsync(long taskId, CancellationToken ct);
+    Task<TaskDetailsDto> GetTaskDetailsForCallerAsync(long taskId, CancellationToken ct);
+    Task<TaskDetailsDto> UpdateTaskAsync(long taskId, UpdateTaskRequestDto request, CancellationToken ct);
 
     Task<(IReadOnlyList<TasksPerAgentReportRowDto> tasksPerAgent, StatusSummaryReportDto statusSummary)> GetReportsAsync(
         TaskFilterDto filter,

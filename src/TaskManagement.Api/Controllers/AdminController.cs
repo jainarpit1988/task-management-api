@@ -180,22 +180,7 @@ public sealed class AdminController : ControllerBase
         return Ok(ApiResponse<object>.Ok(result));
     }
 
-    [HttpGet("tasks/{id:long}")]
-    [ProducesResponseType(typeof(ApiResponse<TaskDetailsDto>), StatusCodes.Status200OK)]
-    public async Task<ActionResult<ApiResponse<TaskDetailsDto>>> GetTaskDetails([FromRoute] long id, CancellationToken ct)
-    {
-        var result = await _admin.GetTaskDetailsAsync(id, ct);
-        return Ok(ApiResponse<TaskDetailsDto>.Ok(result));
-    }
-
-    [HttpGet("tasks/{id:long}/history")]
-    [ProducesResponseType(typeof(ApiResponse<TaskDetailsDto>), StatusCodes.Status200OK)]
-    public async Task<ActionResult<ApiResponse<TaskDetailsDto>>> GetTaskHistory([FromRoute] long id, CancellationToken ct)
-    {
-        // For the current schema, "history" = task details including followups/assignments/acks.
-        var result = await _admin.GetTaskDetailsAsync(id, ct);
-        return Ok(ApiResponse<TaskDetailsDto>.Ok(result));
-    }
+    // NOTE: task details/history endpoints moved to TasksController so AGENT and ADMIN can access them.
 
     [HttpGet("reports")]
     [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status200OK)]
