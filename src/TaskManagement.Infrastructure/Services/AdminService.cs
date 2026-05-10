@@ -622,7 +622,7 @@ public sealed class AdminService : IAdminService
                             BranchHub = branchHub,
                             MobileNo = mobileNo,
                             AssignedAgentId = resolvedAgentId,
-                            Status = TaskStatus.NEW,
+                            Status = TaskStatus.OPEN,
                             RawData = JsonSerializer.Serialize(rawObj),
                             CreatedFromUploadId = upload.Id
                         });
@@ -910,7 +910,7 @@ public sealed class AdminService : IAdminService
             {
                 AgentId = g.Key,
                 Total = g.LongCount(),
-                Open = g.LongCount(x => x.Status == TaskStatus.NEW),
+                Open = g.LongCount(x => x.Status == TaskStatus.OPEN),
                 InProgress = g.LongCount(x => x.Status == TaskStatus.PENDING || x.Status == TaskStatus.FOLLOW_UP_REQUIRED),
                 Closed = g.LongCount(x => x.Status == TaskStatus.CLOSED)
             })
