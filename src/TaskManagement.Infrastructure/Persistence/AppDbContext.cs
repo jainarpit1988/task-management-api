@@ -17,6 +17,8 @@ public sealed class AppDbContext : DbContext
     public DbSet<ExcelUpload> ExcelUploads => Set<ExcelUpload>();
     public DbSet<ExcelUploadError> ExcelUploadErrors => Set<ExcelUploadError>();
     public DbSet<ReportExport> ReportExports => Set<ReportExport>();
+    public DbSet<QueryStatusLookup> QueryStatusLookups => Set<QueryStatusLookup>();
+    public DbSet<StatusLookup> StatusLookups => Set<StatusLookup>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -103,6 +105,12 @@ public sealed class AppDbContext : DbContext
             e.Property(x => x.Location).HasColumnName("location").HasMaxLength(255);
             e.Property(x => x.BranchHub).HasColumnName("branch_hub").HasMaxLength(100);
             e.Property(x => x.MobileNo).HasColumnName("mobile_no").HasMaxLength(20);
+            e.Property(x => x.PinCode).HasColumnName("pin_code").HasMaxLength(45);
+            e.Property(x => x.VisitDate).HasColumnName("visit_date");
+            e.Property(x => x.PdDate).HasColumnName("pd_date");
+            e.Property(x => x.StatusLookupId).HasColumnName("status");
+            e.Property(x => x.QueryStatusLookupId).HasColumnName("task_status");
+            e.Property(x => x.TaskStatusOther).HasColumnName("task_status_other").HasMaxLength(255);
 
             e.Property(x => x.Status).HasColumnName("current_status").HasConversion<string>().IsRequired();
             e.Property(x => x.AssignedAgentId).HasColumnName("current_agent_id");
@@ -267,6 +275,28 @@ public sealed class AppDbContext : DbContext
                 .WithMany(u => u.Errors)
                 .HasForeignKey(x => x.UploadId)
                 .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<QueryStatusLookup>(e =>
+        {
+            e.ToTable("query_status_lookup");
+            e.HasKey(x => x.QueryStatusLookupId);
+            e.Property(x => x.QueryStatusLookupId).HasColumnName("query_status_lookup_id");
+            e.Property(x => x.QueryStatusLookupName).HasColumnName("query_status_lookup_name").HasMaxLength(255).IsRequired();
+            e.Property(x => x.QueryStatusLookupDescription).HasColumnName("query_status_lookup_description");
+            e.Property(x => x.IsActive).HasColumnName("is_Active");
+            e.Property(x => x.CreatedAt).HasColumnName("created_at");
+        });
+
+        modelBuilder.Entity<StatusLookup>(e =>
+        {
+            e.ToTable("status_lookup");
+            e.HasKey(x => x.StatusLookupId);
+            e.Property(x => x.StatusLookupId).HasColumnName("status_lookup_id");
+            e.Property(x => x.LookupName).HasColumnName("lookup_name").HasMaxLength(45).IsRequired();
+            e.Property(x => x.LookupDescription).HasColumnName("lookup_description").HasMaxLength(45);
+            e.Property(x => x.IsActive).HasColumnName("is_active");
+            e.Property(x => x.CreatedAt).HasColumnName("created_at");
         });
 
         modelBuilder.Entity<ReportExport>(e =>

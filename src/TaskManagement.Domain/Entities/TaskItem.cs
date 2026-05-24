@@ -20,6 +20,14 @@ public class TaskItem : AuditableEntity
     public string? Location { get; set; }
     public string? BranchHub { get; set; }
     public string? MobileNo { get; set; }
+    public string? PinCode { get; set; }
+    public DateTime? VisitDate { get; set; }
+    public DateTime? PdDate { get; set; }
+
+    // Lookup FK columns (tasks.status / tasks.task_status)
+    public long? StatusLookupId { get; set; }
+    public long? QueryStatusLookupId { get; set; }
+    public string? TaskStatusOther { get; set; }
 
     // Current task state
     public TaskStatus Status { get; set; } = TaskStatus.NEW; // maps to current_status

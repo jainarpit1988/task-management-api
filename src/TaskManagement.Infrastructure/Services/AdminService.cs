@@ -191,6 +191,30 @@ public sealed class AdminService : IAdminService
             return decimal.TryParse(cleaned, out var v) ? v : null;
         }
 
+        static int? ParseIntOrNull(string? s)
+        {
+            if (string.IsNullOrWhiteSpace(s)) return null;
+            var cleaned = s.Trim().Replace(",", "");
+            return int.TryParse(cleaned, out var v) ? v : null;
+        }
+
+        static DateTime? ParseDateTimeOrNull(string? s)
+        {
+            if (string.IsNullOrWhiteSpace(s)) return null;
+            var trimmed = s.Trim();
+            if (DateTime.TryParse(trimmed, out var dt))
+                return dt;
+            if (double.TryParse(trimmed, out var oa))
+                return DateTime.FromOADate(oa);
+            return null;
+        }
+
+        static string NormalizeLookupKey(string? s)
+        {
+            if (string.IsNullOrWhiteSpace(s)) return string.Empty;
+            return string.Concat(s.Trim().Where(ch => !char.IsWhiteSpace(ch))).ToLowerInvariant();
+        }
+
         static async Task RetryAsync(Func<CancellationToken, Task> action, ILogger logger, string op, long uploadId, CancellationToken ct)
         {
             // 3 tries total (initial + 2 retries)
@@ -293,12 +317,61 @@ public sealed class AdminService : IAdminService
                     return ws.Cells[row, col.Value].Text;
                 }
 
+                // Excel template may contain two "Hub" columns: first -> hub_name, second -> branch_hub.
+                var hubColumns = new List<int>();
+                for (var c = 1; c <= headerLastCol; c++)
+                {
+                    var headerText = ws.Cells[1, c].Text;
+                    if (string.IsNullOrWhiteSpace(headerText)) break;
+                    if (NormHeader(headerText) == "hub")
+                        hubColumns.Add(c);
+                }
+
+                int? HubNameCol() => hubColumns.Count > 0 ? hubColumns[0] : Col("Hub", "HubName", "HUB");
+                int? BranchHubCol() => hubColumns.Count > 1 ? hubColumns[1] : Col("Branch Hub", "BranchHub");
+
+                var queryStatusLookups = await _db.QueryStatusLookups.AsNoTracking()
+                    .Where(x => x.IsActive)
+                    .ToListAsync(ct);
+                var queryStatusByName = queryStatusLookups
+                    .GroupBy(x => NormalizeLookupKey(x.QueryStatusLookupName))
+                    .ToDictionary(g => g.Key, g => g.First().QueryStatusLookupId);
+                var otherQueryStatusId = queryStatusLookups
+                    .FirstOrDefault(x => NormalizeLookupKey(x.QueryStatusLookupName) == "other")
+                    ?.QueryStatusLookupId;
+
+                var defaultStatusLookupId = await _db.StatusLookups.AsNoTracking()
+                    .Where(x => x.IsActive && x.LookupName == "Pending")
+                    .Select(x => x.StatusLookupId)
+                    .FirstOrDefaultAsync(ct);
+                if (defaultStatusLookupId == 0)
+                {
+                    defaultStatusLookupId = await _db.StatusLookups.AsNoTracking()
+                        .Where(x => x.IsActive)
+                        .OrderBy(x => x.StatusLookupId)
+                        .Select(x => x.StatusLookupId)
+                        .FirstOrDefaultAsync(ct);
+                }
+
+                long? ResolveQueryStatusId(string? excelStatus)
+                {
+                    if (string.IsNullOrWhiteSpace(excelStatus)) return null;
+                    var key = NormalizeLookupKey(excelStatus);
+                    if (queryStatusByName.TryGetValue(key, out var id))
+                        return id;
+
+                    // Allow matching by description text when the sheet uses the long-form label.
+                    var byDescription = queryStatusLookups.FirstOrDefault(x =>
+                        NormalizeLookupKey(x.QueryStatusLookupDescription) == key);
+                    return byDescription?.QueryStatusLookupId;
+                }
+
                 // EPPlus Dimension can be huge due to formatting; find last actual data row by scanning used headers.
                 var lastDataRow = 1;
                 if (dimRows > 1)
                 {
                     var end = dimRows;
-                    var maxCols = headerLastCol > 0 ? headerLastCol : Math.Min(dimCols, 12);
+                    var maxCols = headerLastCol > 0 ? headerLastCol : Math.Min(dimCols, 20);
                     for (var r = end; r >= 2; r--)
                     {
                         var hasAny = false;
@@ -514,8 +587,8 @@ public sealed class AdminService : IAdminService
                     try
                     {
                         // Header-based mapping (supports varying Excel formats).
-                        var srNo = NullIfBlank(Cell(row, Col("Sr No", "SrNo", "Sr. No", "SR NO", "Sr_No")));
-                        var hubName = Trunc(NullIfBlank(Cell(row, Col("Hub", "HubName", "HUB"))), 100);
+                        var srNo = ParseIntOrNull(Cell(row, Col("Sr No", "SrNo", "Sr. No", "SR NO", "Sr_No")));
+                        var hubName = Trunc(NullIfBlank(Cell(row, HubNameCol())), 100);
                         var appNo = Trunc(NullIfBlank(Cell(row, Col("Application Number", "ApplicationNo", "Application No", "Application"))), 100);
                         var customerName = Trunc(NullIfBlank(Cell(row, Col("Customer Name", "CustomerName"))), 255);
                         var entityName = Trunc(NullIfBlank(Cell(row, Col("Entity Name", "EntityName"))), 255);
@@ -523,8 +596,13 @@ public sealed class AdminService : IAdminService
                         var loanAmount = ParseDecimalOrNull(Cell(row, Col("Loan amount", "Loan Amount", "LoanAmount")));
                         var customerAddress = NullIfBlank(Cell(row, Col("Address", "Customer Address", "CustomerAddress")));
                         var location = Trunc(NullIfBlank(Cell(row, Col("Location"))), 255);
-                        var branchHub = Trunc(NullIfBlank(Cell(row, Col("Branch Hub", "BranchHub"))), 100);
+                        var pinCode = Trunc(NullIfBlank(Cell(row, Col("Pin Code", "PinCode", "Pincode", "PIN"))), 45);
+                        var branchHub = Trunc(NullIfBlank(Cell(row, BranchHubCol())), 100);
                         var mobileNo = Trunc(NullIfBlank(Cell(row, Col("Mobile No", "MobileNo", "Mobile"))), 20);
+                        var visitDate = ParseDateTimeOrNull(Cell(row, Col("Visit date", "Visit Date", "VisitDate")));
+                        var pdDate = ParseDateTimeOrNull(Cell(row, Col("PD date", "PD Date", "PdDate", "PD Date")));
+                        var excelQueryStatus = NullIfBlank(Cell(row, Col("Status")));
+                        var queryText = NullIfBlank(Cell(row, Col("Query")));
                         var agentEmail = Trunc(NullIfBlank(Cell(row, Col("Agent Email", "AgentEmail"))), 150);
 
                         // InternalId rules:
@@ -535,7 +613,7 @@ public sealed class AdminService : IAdminService
                         var internalId =
                             NullIfBlank(Cell(row, Col("InternalId", "Internal Id", "Internal"))) ??
                             appNo ??
-                            srNo;
+                            (srNo.HasValue ? srNo.Value.ToString() : null);
 
                         if (internalId is not null && internalId.Length > 50)
                             internalId = internalId[..50];
@@ -574,6 +652,54 @@ public sealed class AdminService : IAdminService
                             }
                         }
 
+                        long? queryStatusLookupId = null;
+                        string? taskStatusOther = null;
+                        if (!string.IsNullOrWhiteSpace(excelQueryStatus))
+                        {
+                            queryStatusLookupId = ResolveQueryStatusId(excelQueryStatus);
+                            if (!queryStatusLookupId.HasValue)
+                            {
+                                upload.FailedRows++;
+                                errorBatch.Add(new ExcelUploadError
+                                {
+                                    UploadId = upload.Id,
+                                    ExcelRowNumber = row,
+                                    ErrorMessage = $"Unknown Status value (not in query_status_lookup): {excelQueryStatus}",
+                                    RawData = JsonSerializer.Serialize(new { row, excelQueryStatus, internalId, applicationNo = appNo })
+                                });
+
+                                if (errorBatch.Count >= batchSize)
+                                    await FlushErrorsAsync();
+
+                                continue;
+                            }
+
+                            var isOther = otherQueryStatusId.HasValue &&
+                                          queryStatusLookupId.Value == otherQueryStatusId.Value;
+                            if (isOther)
+                            {
+                                taskStatusOther = queryText;
+                                if (string.IsNullOrWhiteSpace(taskStatusOther))
+                                {
+                                    upload.FailedRows++;
+                                    errorBatch.Add(new ExcelUploadError
+                                    {
+                                        UploadId = upload.Id,
+                                        ExcelRowNumber = row,
+                                        ErrorMessage = "Query is required when Status is Other",
+                                        RawData = JsonSerializer.Serialize(new { row, excelQueryStatus, internalId })
+                                    });
+
+                                    if (errorBatch.Count >= batchSize)
+                                        await FlushErrorsAsync();
+
+                                    continue;
+                                }
+
+                                taskStatusOther = Trunc(taskStatusOther, 255);
+                            }
+                        }
+
                         // Requirement: if Customer Name is blank, skip row (do not insert).
                         if (customerName is null)
                         {
@@ -609,6 +735,7 @@ public sealed class AdminService : IAdminService
                         var rawObj = new Dictionary<string, object?>
                         {
                             ["InternalId"] = internalId,
+                            ["SrNo"] = srNo,
                             ["HubName"] = hubName,
                             ["ApplicationNo"] = appNo,
                             ["CustomerName"] = customerName,
@@ -617,15 +744,22 @@ public sealed class AdminService : IAdminService
                             ["LoanAmount"] = loanAmount,
                             ["CustomerAddress"] = customerAddress,
                             ["Location"] = location,
+                            ["PinCode"] = pinCode,
                             ["BranchHub"] = branchHub,
                             ["MobileNo"] = mobileNo,
+                            ["VisitDate"] = visitDate,
+                            ["PdDate"] = pdDate,
+                            ["QueryStatus"] = excelQueryStatus,
+                            ["QueryStatusLookupId"] = queryStatusLookupId,
+                            ["TaskStatusOther"] = taskStatusOther,
+                            ["StatusLookupId"] = defaultStatusLookupId == 0 ? null : defaultStatusLookupId,
                             ["AgentEmail"] = agentEmail
                         };
 
                         taskBatch.Add(new TaskItem
                         {
                             InternalId = internalId,
-                            SrNo = null,
+                            SrNo = srNo,
                             HubName = hubName,
                             ApplicationNo = appNo,
                             CustomerName = customerName,
@@ -634,8 +768,14 @@ public sealed class AdminService : IAdminService
                             LoanAmount = loanAmount,
                             CustomerAddress = customerAddress,
                             Location = location,
+                            PinCode = pinCode,
                             BranchHub = branchHub,
                             MobileNo = mobileNo,
+                            VisitDate = visitDate,
+                            PdDate = pdDate,
+                            QueryStatusLookupId = queryStatusLookupId,
+                            TaskStatusOther = taskStatusOther,
+                            StatusLookupId = defaultStatusLookupId == 0 ? null : defaultStatusLookupId,
                             AssignedAgentId = resolvedAgentId,
                             Status = TaskStatus.NEW,
                             RawData = JsonSerializer.Serialize(rawObj),
