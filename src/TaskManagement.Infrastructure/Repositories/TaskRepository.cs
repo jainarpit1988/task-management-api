@@ -38,7 +38,38 @@ public sealed class TaskRepository : ITaskRepository
         if (page <= 0) page = 1;
         if (pageSize <= 0) pageSize = 20;
 
-        var q = _db.Tasks.AsNoTracking().Where(x => !x.IsDeleted);
+        var q = ApplyListFilters(_db.Tasks.AsNoTracking(), agentId, fromDate, toDate, status, search);
+
+        var total = await q.LongCountAsync(ct);
+        var items = await q.OrderByDescending(x => x.Id)
+            .Skip((page - 1) * pageSize)
+            .Take(pageSize)
+            .ToListAsync(ct);
+
+        return (items, total);
+    }
+
+    public async Task<IReadOnlyList<TaskItem>> ListAllAsync(
+        long? agentId,
+        DateOnly? fromDate,
+        DateOnly? toDate,
+        TaskStatus? status,
+        string? search,
+        CancellationToken ct)
+    {
+        var q = ApplyListFilters(_db.Tasks.AsNoTracking(), agentId, fromDate, toDate, status, search);
+        return await q.OrderByDescending(x => x.Id).ToListAsync(ct);
+    }
+
+    private static IQueryable<TaskItem> ApplyListFilters(
+        IQueryable<TaskItem> q,
+        long? agentId,
+        DateOnly? fromDate,
+        DateOnly? toDate,
+        TaskStatus? status,
+        string? search)
+    {
+        q = q.Where(x => !x.IsDeleted);
 
         if (agentId.HasValue) q = q.Where(x => x.AssignedAgentId == agentId.Value);
         if (status.HasValue) q = q.Where(x => x.Status == status.Value);
@@ -66,13 +97,7 @@ public sealed class TaskRepository : ITaskRepository
                 (x.EntityName != null && x.EntityName.Contains(search)));
         }
 
-        var total = await q.LongCountAsync(ct);
-        var items = await q.OrderByDescending(x => x.Id)
-            .Skip((page - 1) * pageSize)
-            .Take(pageSize)
-            .ToListAsync(ct);
-
-        return (items, total);
+        return q;
     }
 
     public async Task<(IReadOnlyList<TaskItem> Items, long TotalCount)> ListForAgentAsync(

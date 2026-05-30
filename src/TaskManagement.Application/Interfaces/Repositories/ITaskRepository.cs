@@ -16,6 +16,14 @@ public interface ITaskRepository
         int pageSize,
         CancellationToken ct);
 
+    Task<IReadOnlyList<TaskItem>> ListAllAsync(
+        long? agentId,
+        DateOnly? fromDate,
+        DateOnly? toDate,
+        TaskStatus? status,
+        string? search,
+        CancellationToken ct);
+
     Task<(IReadOnlyList<TaskItem> Items, long TotalCount)> ListForAgentAsync(
         long agentId,
         DateOnly? fromDate,

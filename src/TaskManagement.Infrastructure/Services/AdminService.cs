@@ -1397,48 +1397,100 @@ public sealed class AdminService : IAdminService
     {
         ExcelPackage.LicenseContext = LicenseContext.NonCommercial;
 
-        var (tasksPerAgent, statusSummary) = await GetReportsAsync(filter, ct);
+        const long queryStatusRequiresOtherText1 = 1;
+        const long queryStatusRequiresOtherText2 = 13;
+
+        var tasks = await _tasks.ListAllAsync(
+            filter.AgentId, filter.FromDate, filter.ToDate, filter.Status, filter.Search, ct);
+
+        var statusLookupMap = await _db.StatusLookups.AsNoTracking()
+            .ToDictionaryAsync(x => x.StatusLookupId, x => x.LookupName, ct);
+
+        var queryStatusLookupMap = await _db.QueryStatusLookups.AsNoTracking()
+            .ToDictionaryAsync(x => x.QueryStatusLookupId, x => x.QueryStatusLookupName, ct);
+
+        var agentIds = tasks.Where(x => x.AssignedAgentId.HasValue)
+            .Select(x => x.AssignedAgentId!.Value)
+            .Distinct()
+            .ToList();
+
+        var agentMap = agentIds.Count == 0
+            ? new Dictionary<long, User>()
+            : await _db.Users.AsNoTracking()
+                .Where(x => agentIds.Contains(x.Id))
+                .ToDictionaryAsync(x => x.Id, ct);
 
         using var package = new ExcelPackage();
+        var ws = package.Workbook.Worksheets.Add("Sheet1");
 
-        var ws1 = package.Workbook.Worksheets.Add("TasksPerAgent");
-        ws1.Cells[1, 1].Value = "AgentId";
-        ws1.Cells[1, 2].Value = "AgentName";
-        ws1.Cells[1, 3].Value = "TotalTasks";
-        ws1.Cells[1, 4].Value = "Open";
-        ws1.Cells[1, 5].Value = "InProgress";
-        ws1.Cells[1, 6].Value = "Closed";
+        ws.Cells[1, 1].Value = "Sr No";
+        ws.Cells[1, 2].Value = "Hub 1";
+        ws.Cells[1, 3].Value = "Application Number";
+        ws.Cells[1, 4].Value = "Customer Name";
+        ws.Cells[1, 5].Value = "Entity Name";
+        ws.Cells[1, 6].Value = "Loan Type";
+        ws.Cells[1, 7].Value = "Loan amount";
+        ws.Cells[1, 8].Value = "Address";
+        ws.Cells[1, 9].Value = "Location";
+        ws.Cells[1, 10].Value = "Pin Code";
+        ws.Cells[1, 11].Value = "Hub 2";
+        ws.Cells[1, 12].Value = "Mobile No";
+        ws.Cells[1, 13].Value = "Status";
+        ws.Cells[1, 14].Value = "Visit date";
+        ws.Cells[1, 15].Value = "PD date";
+        ws.Cells[1, 16].Value = "PD status";
+        ws.Cells[1, 17].Value = "Task Status";
+        ws.Cells[1, 18].Value = "Query";
+        ws.Cells[1, 19].Value = "Agent Email";
+        ws.Cells[1, 20].Value = "Agent Mobile No.";
 
-        var r = 2;
-        foreach (var row in tasksPerAgent)
+        var row = 2;
+        foreach (var task in tasks)
         {
-            ws1.Cells[r, 1].Value = row.AgentId;
-            ws1.Cells[r, 2].Value = row.AgentName;
-            ws1.Cells[r, 3].Value = row.TotalTasks;
-            ws1.Cells[r, 4].Value = row.OpenTasks;
-            ws1.Cells[r, 5].Value = row.InProgressTasks;
-            ws1.Cells[r, 6].Value = row.ClosedTasks;
-            r++;
+            ws.Cells[row, 1].Value = task.SrNo;
+            ws.Cells[row, 2].Value = task.HubName;
+            ws.Cells[row, 3].Value = task.ApplicationNo;
+            ws.Cells[row, 4].Value = task.CustomerName;
+            ws.Cells[row, 5].Value = task.EntityName;
+            ws.Cells[row, 6].Value = task.LoanType;
+            ws.Cells[row, 7].Value = task.LoanAmount;
+            ws.Cells[row, 8].Value = task.CustomerAddress;
+            ws.Cells[row, 9].Value = task.Location;
+            SetTextCell(ws.Cells[row, 10], task.PinCode);
+            ws.Cells[row, 11].Value = task.BranchHub;
+            SetTextCell(ws.Cells[row, 12], task.MobileNo);
+            ws.Cells[row, 13].Value = task.Status.ToString();
+
+            SetDateCell(ws.Cells[row, 14], task.VisitDate);
+            SetDateCell(ws.Cells[row, 15], task.PdDate);
+
+            ws.Cells[row, 16].Value = task.StatusLookupId.HasValue &&
+                                      statusLookupMap.TryGetValue(task.StatusLookupId.Value, out var pdStatus)
+                ? pdStatus
+                : null;
+
+            ws.Cells[row, 17].Value = task.QueryStatusLookupId.HasValue &&
+                                      queryStatusLookupMap.TryGetValue(task.QueryStatusLookupId.Value, out var taskStatus)
+                ? taskStatus
+                : null;
+
+            var includeQuery = task.QueryStatusLookupId is queryStatusRequiresOtherText1 or queryStatusRequiresOtherText2;
+            ws.Cells[row, 18].Value = includeQuery ? task.TaskStatusOther : null;
+
+            if (task.AssignedAgentId.HasValue && agentMap.TryGetValue(task.AssignedAgentId.Value, out var agent))
+            {
+                ws.Cells[row, 19].Value = agent.Email;
+                SetTextCell(ws.Cells[row, 20], agent.Mobile);
+            }
+
+            row++;
         }
 
-        ws1.Cells[ws1.Dimension.Address].AutoFitColumns();
-
-        var ws2 = package.Workbook.Worksheets.Add("StatusSummary");
-        ws2.Cells[1, 1].Value = "Status";
-        ws2.Cells[1, 2].Value = "Count";
-
-        var rr = 2;
-        foreach (var kv in statusSummary.Counts.OrderBy(x => x.Key.ToString()))
-        {
-            ws2.Cells[rr, 1].Value = kv.Key.ToString();
-            ws2.Cells[rr, 2].Value = kv.Value;
-            rr++;
-        }
-
-        ws2.Cells[ws2.Dimension.Address].AutoFitColumns();
+        ws.Cells[1, 1, Math.Max(row - 1, 1), 20].AutoFitColumns();
 
         var bytes = package.GetAsByteArray();
-        var fileName = $"report_{DateTime.UtcNow:yyyyMMdd_HHmmss}.xlsx";
+        var exportDate = IndiaDateTime.FromUtcToIst(DateTime.UtcNow);
+        var fileName = $"export_{exportDate:ddMMyyyy}.xlsx";
 
         await _reportExports.AddAsync(new ReportExport
         {
@@ -1449,6 +1501,21 @@ public sealed class AdminService : IAdminService
         await _reportExports.SaveChangesAsync(ct);
 
         return (bytes, fileName);
+    }
+
+    private static void SetTextCell(OfficeOpenXml.ExcelRange cell, string? value)
+    {
+        cell.Value = value;
+        cell.Style.Numberformat.Format = "@";
+    }
+
+    private static void SetDateCell(OfficeOpenXml.ExcelRange cell, DateTime? utcValue)
+    {
+        if (!utcValue.HasValue)
+            return;
+
+        cell.Value = IndiaDateTime.FromUtcToIst(utcValue.Value);
+        cell.Style.Numberformat.Format = "yyyy-mm-dd";
     }
 
     public async Task<ExcelUploadHistoryDto> GetExcelUploadHistoryAsync(int page, int pageSize, CancellationToken ct)
