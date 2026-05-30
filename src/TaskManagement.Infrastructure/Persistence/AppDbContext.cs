@@ -316,6 +316,25 @@ public sealed class AppDbContext : DbContext
                 .HasForeignKey(x => x.GeneratedBy)
                 .OnDelete(DeleteBehavior.Restrict);
         });
+
+        ApplyUtcDateTimeConverters(modelBuilder);
+    }
+
+    private static void ApplyUtcDateTimeConverters(ModelBuilder modelBuilder)
+    {
+        foreach (var entityType in modelBuilder.Model.GetEntityTypes())
+        {
+            foreach (var property in entityType.GetProperties())
+            {
+                if (property.GetValueConverter() is not null)
+                    continue;
+
+                if (property.ClrType == typeof(DateTime))
+                    property.SetValueConverter(UtcDateTimeConverter.NonNullable);
+                else if (property.ClrType == typeof(DateTime?))
+                    property.SetValueConverter(UtcDateTimeConverter.Nullable);
+            }
+        }
     }
 }
 

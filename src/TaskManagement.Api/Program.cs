@@ -10,6 +10,7 @@ using Microsoft.OpenApi.Models;
 using System.Data;
 using System.Text.Json.Serialization;
 using Serilog;
+using TaskManagement.Api.Serialization;
 using TaskManagement.Application.Mapping;
 using TaskManagement.Infrastructure;
 using TaskManagement.Infrastructure.Persistence;
@@ -49,8 +50,9 @@ builder.Services.Configure<IISServerOptions>(o =>
 builder.Services.AddControllers()
     .AddJsonOptions(o =>
     {
+        o.JsonSerializerOptions.Converters.Add(new IstDateTimeJsonConverter());
+        o.JsonSerializerOptions.Converters.Add(new IstNullableDateTimeJsonConverter());
         // Send/receive enums as strings to avoid UI-index -> enum-number mismatches
-        // (e.g., "In Progress" being sent as 2 and parsed as VISITED).
         o.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter(allowIntegerValues: false));
     });
 builder.Services.AddHostedService<ExcelUploadWorker>();

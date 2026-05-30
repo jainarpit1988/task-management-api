@@ -5,18 +5,24 @@ namespace TaskManagement.Application.DTOs.Tasks;
 
 public sealed class UpdateTaskRequestDto
 {
+    // Update Status form -> tasks.current_status
     public TaskStatus? Status { get; set; }
-    public DateOnly? DueDate { get; set; }
-    public DateOnly? PdDate { get; set; }
 
-    // FK to status_lookup (tasks.status) — PD Done, Pending, etc.
-    public long? PdStatusId { get; set; }
+    // PD status -> tasks.status (status_lookup FK)
+    [JsonPropertyName("pdStatus")]
+    public long? PdStatus { get; set; }
 
-    // FK to query_status_lookup (tasks.task_status).
-    public long? TaskStatusId { get; set; }
+    // Query/task status -> tasks.task_status (query_status_lookup FK)
+    [JsonPropertyName("taskStatus")]
+    public long? TaskStatusLookupId { get; set; }
 
-    // Required when taskStatusId is "Other" (query_status_lookup).
+    // Required when taskStatus is "Other"
     [JsonPropertyName("other_text")]
     public string? OtherText { get; set; }
-}
 
+    [JsonIgnore]
+    public bool OtherTextProvided { get; set; }
+
+    public DateTime? PdDate { get; set; }
+    public DateOnly? DueDate { get; set; }
+}

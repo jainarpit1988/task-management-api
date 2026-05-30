@@ -11,8 +11,6 @@ public sealed class TaskDetailsDto
     public string? CustomerName { get; set; }
     public string? MobileNo { get; set; }
 
-    // Alias exposed to clients that bind to a "Phone No." field.
-    // Always reflects MobileNo so the same value renders under either key.
     public string? PhoneNo => MobileNo;
     public string? Phone => MobileNo;
 
@@ -21,13 +19,21 @@ public sealed class TaskDetailsDto
     public long? AssignedAgentId { get; set; }
     public DateTime? DueDate { get; set; }
     public DateTime? PdDate { get; set; }
-    public long? PdStatusId { get; set; }
-    public long? TaskStatusId { get; set; }
+
+    // tasks.current_status (Update Status form)
+    public TaskStatus Status { get; set; }
+
+    // tasks.status (status_lookup FK)
+    [JsonPropertyName("pdStatusId")]
+    public long? PdStatus { get; set; }
+
+    // tasks.task_status (query_status_lookup FK)
+    [JsonPropertyName("taskStatusId")]
+    public long? TaskStatusLookupId { get; set; }
 
     [JsonPropertyName("other_text")]
     public string? OtherText { get; set; }
 
-    public TaskStatus Status { get; set; }
     public long? LastUpdateId { get; set; }
 
     public bool Acknowledged { get; set; }
@@ -39,4 +45,3 @@ public sealed class TaskDetailsDto
     public List<TaskAssignmentDto> Assignments { get; set; } = new();
     public List<TaskAcknowledgementDto> Acknowledgements { get; set; } = new();
 }
-

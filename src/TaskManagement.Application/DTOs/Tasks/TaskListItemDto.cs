@@ -11,22 +11,24 @@ public sealed class TaskListItemDto
     public string? CustomerName { get; set; }
     public string? MobileNo { get; set; }
 
-    // Alias exposed to clients that bind to a "Phone No." field.
-    // Always reflects MobileNo so the same value renders under either key.
     public string? PhoneNo => MobileNo;
     public string? Phone => MobileNo;
 
     public long? AssignedAgentId { get; set; }
     public DateTime? DueDate { get; set; }
     public DateTime? PdDate { get; set; }
-    public long? PdStatusId { get; set; }
-    public long? TaskStatusId { get; set; }
+
+    public TaskStatus Status { get; set; }
+
+    [JsonPropertyName("pdStatusId")]
+    public long? PdStatus { get; set; }
+
+    [JsonPropertyName("taskStatusId")]
+    public long? TaskStatusLookupId { get; set; }
 
     [JsonPropertyName("other_text")]
     public string? OtherText { get; set; }
 
-    public TaskStatus Status { get; set; }
     public bool Acknowledged { get; set; }
     public DateTime? AcknowledgedAt { get; set; }
 }
-

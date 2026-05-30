@@ -1,6 +1,7 @@
 using TaskManagement.Application.Common;
 using TaskManagement.Application.DTOs;
 using TaskManagement.Application.DTOs.Admin;
+using TaskManagement.Application.DTOs.Agent;
 using TaskManagement.Application.DTOs.Common;
 using TaskManagement.Application.DTOs.Reports;
 using TaskManagement.Application.DTOs.Tasks;
@@ -25,6 +26,7 @@ public interface IAdminService
     Task<TaskDetailsDto> GetTaskDetailsAsync(long taskId, CancellationToken ct);
     Task<TaskDetailsDto> GetTaskDetailsForCallerAsync(long taskId, CancellationToken ct);
     Task<TaskDetailsDto> UpdateTaskAsync(long taskId, UpdateTaskRequestDto request, CancellationToken ct);
+    Task<TaskDetailsDto> AddTaskFollowUpAsync(long taskId, AddTaskUpdateRequestDto request, CancellationToken ct);
 
     Task<(IReadOnlyList<TasksPerAgentReportRowDto> tasksPerAgent, StatusSummaryReportDto statusSummary)> GetReportsAsync(
         TaskFilterDto filter,

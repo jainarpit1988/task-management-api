@@ -12,9 +12,8 @@ public sealed class UpdateTaskRequestValidator : AbstractValidator<UpdateTaskReq
         RuleFor(x => x.OtherText).MaximumLength(255).When(x => !string.IsNullOrWhiteSpace(x.OtherText));
 
         RuleFor(x => x)
-            .Must(x => x.Status.HasValue || x.DueDate.HasValue || x.PdDate.HasValue ||
-                       x.PdStatusId.HasValue || x.TaskStatusId.HasValue)
-            .WithMessage("Provide at least one field: status, dueDate, pdDate, pdStatusId, or taskStatusId.");
+            .Must(x => x.Status.HasValue || x.PdStatus.HasValue || x.TaskStatusLookupId.HasValue ||
+                       x.PdDate.HasValue || x.DueDate.HasValue || x.OtherTextProvided)
+            .WithMessage("Provide at least one field: status, pdStatus, taskStatusId, pdDate, dueDate, or other_text.");
     }
 }
-

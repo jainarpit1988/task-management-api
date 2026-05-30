@@ -8,6 +8,7 @@ using TaskManagement.Application.Common;
 using TaskManagement.Application.Common.Exceptions;
 using TaskManagement.Application.DTOs;
 using TaskManagement.Application.DTOs.Admin;
+using TaskManagement.Application.DTOs.Agent;
 using TaskManagement.Application.DTOs.Common;
 using TaskManagement.Application.DTOs.Reports;
 using TaskManagement.Application.DTOs.Tasks;
@@ -24,6 +25,7 @@ public sealed class AdminService : IAdminService
 {
     private readonly IUserRepository _users;
     private readonly ITaskRepository _tasks;
+    private readonly ITaskUpdateRepository _updates;
     private readonly ITaskAssignmentRepository _assignments;
     private readonly IExcelUploadRepository _uploads;
     private readonly IExcelUploadErrorRepository _uploadErrors;
@@ -36,6 +38,7 @@ public sealed class AdminService : IAdminService
     public AdminService(
         IUserRepository users,
         ITaskRepository tasks,
+        ITaskUpdateRepository updates,
         ITaskAssignmentRepository assignments,
         IExcelUploadRepository uploads,
         IExcelUploadErrorRepository uploadErrors,
@@ -47,6 +50,7 @@ public sealed class AdminService : IAdminService
     {
         _users = users;
         _tasks = tasks;
+        _updates = updates;
         _assignments = assignments;
         _uploads = uploads;
         _uploadErrors = uploadErrors;
@@ -374,14 +378,15 @@ public sealed class AdminService : IAdminService
                 {
                     if (!col.HasValue) return null;
                     var cell = ws.Cells[row, col.Value];
-                    if (cell.Value is DateTime dt) return dt;
-                    if (cell.Value is double d)
+                    DateTime? local = null;
+                    if (cell.Value is DateTime dt) local = dt;
+                    else if (cell.Value is double d)
                     {
                         try
                         {
                             var parsed = DateTime.FromOADate(d);
                             if (parsed.Year is >= 1900 and <= 2100)
-                                return parsed;
+                                local = parsed;
                         }
                         catch
                         {
@@ -389,7 +394,8 @@ public sealed class AdminService : IAdminService
                         }
                     }
 
-                    return ParseDateTimeOrNull(Cell(row, col));
+                    local ??= ParseDateTimeOrNull(Cell(row, col));
+                    return IndiaDateTime.IstLocalToUtc(local);
                 }
 
                 // Duplicate plain "Hub" headers: first -> hub_name, second -> branch_hub.
@@ -1044,8 +1050,53 @@ public sealed class AdminService : IAdminService
         return _mapper.Map<TaskDetailsDto>(task);
     }
 
+    public async Task<TaskDetailsDto> AddTaskFollowUpAsync(long taskId, AddTaskUpdateRequestDto request, CancellationToken ct)
+    {
+        var task = await _tasks.GetByIdAsync(taskId, includeDetails: false, ct)
+                   ?? throw new NotFoundException("Task not found");
+
+        if (_currentUser.Role == UserRole.AGENT && task.AssignedAgentId != _currentUser.UserId)
+            throw new ForbiddenException("You cannot update tasks assigned to other agents");
+
+        var update = new TaskUpdate
+        {
+            TaskId = taskId,
+            AgentId = _currentUser.UserId,
+            Status = request.Status,
+            Comment = request.Comment,
+            MeetingPersonName = request.MeetingPersonName,
+            MeetingPersonMobile = request.MeetingPersonMobile,
+            FollowupDate = request.FollowupDate
+        };
+
+        await _updates.AddAsync(update, ct);
+
+        task.Status = Enum.TryParse<TaskStatus>(request.Status.ToString(), out var mapped)
+            ? mapped
+            : TaskStatus.PENDING;
+        task.UpdatedAt = DateTime.UtcNow;
+
+        await _tasks.SaveChangesAsync(ct);
+
+        task.LastUpdateId = update.Id;
+        await _tasks.SaveChangesAsync(ct);
+
+        var updated = await _tasks.GetByIdAsync(taskId, includeDetails: true, ct)
+                      ?? throw new NotFoundException("Task not found");
+
+        return _mapper.Map<TaskDetailsDto>(updated);
+    }
+
     public async Task<TaskDetailsDto> UpdateTaskAsync(long taskId, UpdateTaskRequestDto request, CancellationToken ct)
     {
+        static string? NormalizeOtherText(string? text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+                return null;
+            var trimmed = text.Trim();
+            return trimmed.Length <= 255 ? trimmed : trimmed[..255];
+        }
+
         var task = await _tasks.GetByIdAsync(taskId, includeDetails: false, ct)
                    ?? throw new NotFoundException("Task not found");
 
@@ -1059,45 +1110,37 @@ public sealed class AdminService : IAdminService
             task.Status = request.Status.Value;
 
         if (request.DueDate.HasValue)
-            task.DueDate = request.DueDate.Value.ToDateTime(TimeOnly.MinValue);
+            task.DueDate = IndiaDateTime.IstDateOnlyToUtc(request.DueDate.Value);
 
         if (request.PdDate.HasValue)
-            task.PdDate = request.PdDate.Value.ToDateTime(TimeOnly.MinValue);
+            task.PdDate = IndiaDateTime.ToUtcForStorage(request.PdDate.Value);
 
-        if (request.PdStatusId.HasValue)
+        if (request.PdStatus.HasValue)
         {
             var pdStatusExists = await _db.StatusLookups.AsNoTracking()
-                .AnyAsync(x => x.StatusLookupId == request.PdStatusId.Value && x.IsActive, ct);
+                .AnyAsync(x => x.StatusLookupId == request.PdStatus.Value && x.IsActive, ct);
             if (!pdStatusExists)
-                throw new AppException("Invalid pdStatusId. Choose an active value from status_lookup.", 400);
+                throw new AppException("Invalid pdStatus. Choose an active value from status_lookup.", 400);
 
-            task.StatusLookupId = request.PdStatusId.Value;
+            task.StatusLookupId = request.PdStatus.Value;
         }
 
-        if (request.TaskStatusId.HasValue)
+        if (request.TaskStatusLookupId.HasValue)
         {
             var queryStatus = await _db.QueryStatusLookups.AsNoTracking()
-                .FirstOrDefaultAsync(x => x.QueryStatusLookupId == request.TaskStatusId.Value && x.IsActive, ct);
+                .FirstOrDefaultAsync(x => x.QueryStatusLookupId == request.TaskStatusLookupId.Value && x.IsActive, ct);
             if (queryStatus is null)
-                throw new AppException("Invalid taskStatusId. Choose an active value from query_status_lookup.", 400);
+                throw new AppException("Invalid taskStatus. Choose an active value from query_status_lookup.", 400);
 
             var isOther = string.Equals(queryStatus.QueryStatusLookupName, "Other", StringComparison.OrdinalIgnoreCase);
-            if (isOther)
-            {
-                if (string.IsNullOrWhiteSpace(request.OtherText))
-                    throw new AppException("other_text is required when taskStatusId is Other.", 400);
+            if (isOther && string.IsNullOrWhiteSpace(request.OtherText))
+                throw new AppException("other_text is required when taskStatus is Other.", 400);
 
-                task.TaskStatusOther = request.OtherText.Trim().Length <= 255
-                    ? request.OtherText.Trim()
-                    : request.OtherText.Trim()[..255];
-            }
-            else
-            {
-                task.TaskStatusOther = null;
-            }
-
-            task.QueryStatusLookupId = request.TaskStatusId.Value;
+            task.QueryStatusLookupId = request.TaskStatusLookupId.Value;
         }
+
+        if (request.OtherTextProvided)
+            task.TaskStatusOther = NormalizeOtherText(request.OtherText);
 
         task.UpdatedAt = now;
 
@@ -1126,14 +1169,19 @@ public sealed class AdminService : IAdminService
             var baseMsg = ex.GetBaseException().Message;
 
             if (request.Status.HasValue || request.DueDate.HasValue || request.PdDate.HasValue ||
-                request.PdStatusId.HasValue || request.TaskStatusId.HasValue)
+                request.PdStatus.HasValue || request.TaskStatusLookupId.HasValue || request.OtherTextProvided)
             {
-                var dueDate = request.DueDate?.ToDateTime(TimeOnly.MinValue);
-                var pdDate = request.PdDate?.ToDateTime(TimeOnly.MinValue);
-                var pdStatusId = request.PdStatusId;
-                var taskStatusId = request.TaskStatusId;
-                var taskStatusOther = string.IsNullOrWhiteSpace(request.OtherText) ? null : request.OtherText.Trim();
-                var mappedStatus = request.Status.HasValue ? MapToOpenInProgressClosed(request.Status.Value) : null;
+                var dueDate = request.DueDate.HasValue ? IndiaDateTime.IstDateOnlyToUtc(request.DueDate.Value) : (DateTime?)null;
+                var pdDate = IndiaDateTime.ToUtcForStorage(request.PdDate);
+                var dbNow = IndiaDateTime.ToDbValue(now);
+                var dbDueDate = IndiaDateTime.ToDbValue(dueDate);
+                var dbPdDate = IndiaDateTime.ToDbValue(pdDate);
+                var pdStatusId = request.PdStatus;
+                var taskStatusId = request.TaskStatusLookupId;
+                var taskStatusOther = request.OtherTextProvided ? NormalizeOtherText(request.OtherText) : null;
+                var mappedStatus = request.Status.HasValue
+                    ? MapToOpenInProgressClosed(request.Status.Value)
+                    : null;
 
                 async Task TryRawUpdateAsync(string statusColumn)
                 {
@@ -1148,7 +1196,7 @@ public sealed class AdminService : IAdminService
 #pragma warning disable EF1002
                             await _db.Database.ExecuteSqlRawAsync(
                                 $"UPDATE `tasks` SET `updated_at` = @p0, `{statusColumn}` = @p1, `due_date` = @p2, `pd_date` = @p3 WHERE `id` = @p4;",
-                                now, mappedStatus, dueDate.Value, pdDate.Value, taskId, ct);
+                                dbNow, mappedStatus, dbDueDate!.Value, dbPdDate!.Value, taskId, ct);
 #pragma warning restore EF1002
                         }
                         else if (mappedStatus is not null && dueDate is not null)
@@ -1156,7 +1204,7 @@ public sealed class AdminService : IAdminService
 #pragma warning disable EF1002
                             await _db.Database.ExecuteSqlRawAsync(
                                 $"UPDATE `tasks` SET `updated_at` = @p0, `{statusColumn}` = @p1, `due_date` = @p2 WHERE `id` = @p3;",
-                                now, mappedStatus, dueDate.Value, taskId, ct);
+                                dbNow, mappedStatus, dbDueDate!.Value, taskId, ct);
 #pragma warning restore EF1002
                         }
                         else if (mappedStatus is not null && pdDate is not null)
@@ -1164,34 +1212,34 @@ public sealed class AdminService : IAdminService
 #pragma warning disable EF1002
                             await _db.Database.ExecuteSqlRawAsync(
                                 $"UPDATE `tasks` SET `updated_at` = @p0, `{statusColumn}` = @p1, `pd_date` = @p2 WHERE `id` = @p3;",
-                                now, mappedStatus, pdDate.Value, taskId, ct);
+                                dbNow, mappedStatus, dbPdDate!.Value, taskId, ct);
 #pragma warning restore EF1002
                         }
                         else if (dueDate is not null && pdDate is not null)
                         {
                             await _db.Database.ExecuteSqlRawAsync(
                                 $"UPDATE `tasks` SET `updated_at` = @p0, `due_date` = @p1, `pd_date` = @p2 WHERE `id` = @p3;",
-                                now, dueDate.Value, pdDate.Value, taskId, ct);
+                                dbNow, dbDueDate!.Value, dbPdDate!.Value, taskId, ct);
                         }
                         else if (mappedStatus is not null)
                         {
 #pragma warning disable EF1002
                             await _db.Database.ExecuteSqlRawAsync(
                                 $"UPDATE `tasks` SET `updated_at` = @p0, `{statusColumn}` = @p1 WHERE `id` = @p2;",
-                                now, mappedStatus, taskId, ct);
+                                dbNow, mappedStatus, taskId, ct);
 #pragma warning restore EF1002
                         }
                         else if (dueDate is not null)
                         {
                             await _db.Database.ExecuteSqlRawAsync(
                                 $"UPDATE `tasks` SET `updated_at` = @p0, `due_date` = @p1 WHERE `id` = @p2;",
-                                now, dueDate.Value, taskId, ct);
+                                dbNow, dbDueDate!.Value, taskId, ct);
                         }
                         else if (pdDate is not null)
                         {
                             await _db.Database.ExecuteSqlRawAsync(
                                 $"UPDATE `tasks` SET `updated_at` = @p0, `pd_date` = @p1 WHERE `id` = @p2;",
-                                now, pdDate.Value, taskId, ct);
+                                dbNow, dbPdDate!.Value, taskId, ct);
                         }
 
                         // If one of the columns exists and the value is valid, we are done.
@@ -1211,7 +1259,7 @@ public sealed class AdminService : IAdminService
                     {
                         await _db.Database.ExecuteSqlRawAsync(
                             "UPDATE `tasks` SET `updated_at` = @p0, `status` = @p1 WHERE `id` = @p2;",
-                            now, pdStatusId.Value, taskId, ct);
+                            dbNow, pdStatusId.Value, taskId, ct);
                     }
                     catch
                     {
@@ -1227,14 +1275,27 @@ public sealed class AdminService : IAdminService
                         {
                             await _db.Database.ExecuteSqlRawAsync(
                                 "UPDATE `tasks` SET `updated_at` = @p0, `task_status` = @p1, `task_status_other` = @p2 WHERE `id` = @p3;",
-                                now, taskStatusId.Value, taskStatusOther, taskId, ct);
+                                dbNow, taskStatusId.Value, taskStatusOther, taskId, ct);
                         }
                         else
                         {
                             await _db.Database.ExecuteSqlRawAsync(
-                                "UPDATE `tasks` SET `updated_at` = @p0, `task_status` = @p1, `task_status_other` = NULL WHERE `id` = @p2;",
-                                now, taskStatusId.Value, taskId, ct);
+                                "UPDATE `tasks` SET `updated_at` = @p0, `task_status` = @p1 WHERE `id` = @p2;",
+                                dbNow, taskStatusId.Value, taskId, ct);
                         }
+                    }
+                    catch
+                    {
+                        // ignore; EF reload below will reflect whether update succeeded
+                    }
+                }
+                else if (request.OtherTextProvided)
+                {
+                    try
+                    {
+                        await _db.Database.ExecuteSqlRawAsync(
+                            "UPDATE `tasks` SET `updated_at` = @p0, `task_status_other` = @p1 WHERE `id` = @p2;",
+                            dbNow, taskStatusOther ?? string.Empty, taskId, ct);
                     }
                     catch
                     {
@@ -1244,7 +1305,7 @@ public sealed class AdminService : IAdminService
             }
             else
             {
-                throw new AppException("Provide at least one field: status, dueDate, pdDate, pdStatusId, or taskStatusId.");
+                throw new AppException("Provide at least one field: status, pdStatus, taskStatusId, pdDate, dueDate, or other_text.");
             }
 
             // If the raw update didn't work, bubble up the root cause for visibility.
