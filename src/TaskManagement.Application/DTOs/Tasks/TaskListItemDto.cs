@@ -17,6 +17,7 @@ public sealed class TaskListItemDto
 
     public long? AssignedAgentId { get; set; }
     public DateTime? DueDate { get; set; }
+    public DateTime? PdDate { get; set; }
     public TaskStatus Status { get; set; }
     public bool Acknowledged { get; set; }
     public DateTime? AcknowledgedAt { get; set; }

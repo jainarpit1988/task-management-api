@@ -37,8 +37,8 @@ public sealed class TaskUpdateController : ControllerBase
         CancellationToken ct)
     {
         // Accept both payload shapes:
-        // 1) { "status": "...", "dueDate": "..." }
-        // 2) { "request": { "status": "...", "dueDate": "..." } }
+        // 1) { "status": "...", "dueDate": "...", "pdDate": "..." }
+        // 2) { "request": { "status": "...", "dueDate": "...", "pdDate": "..." } }
         UpdateTaskRequestDto request;
         try
         {

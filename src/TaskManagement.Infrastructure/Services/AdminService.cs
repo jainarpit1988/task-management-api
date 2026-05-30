@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using AutoMapper;
 using Microsoft.EntityFrameworkCore;
@@ -292,7 +293,10 @@ public sealed class AdminService : IAdminService
                 var headerLastCol = 0;
                 for (var c = 1; c <= dimCols; c++)
                 {
-                    var h = ws.Cells[1, c].Text;
+                    var cell = ws.Cells[1, c];
+                    var h = cell.Text;
+                    if (string.IsNullOrWhiteSpace(h))
+                        h = cell.Value?.ToString();
                     if (string.IsNullOrWhiteSpace(h)) break;
                     headerLastCol = c;
                     var key = NormHeader(h);
@@ -314,21 +318,99 @@ public sealed class AdminService : IAdminService
                 string Cell(int row, int? col)
                 {
                     if (!col.HasValue) return string.Empty;
-                    return ws.Cells[row, col.Value].Text;
+                    var cell = ws.Cells[row, col.Value];
+                    var value = cell.Value;
+
+                    if (value is DateTime dt)
+                        return dt.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
+
+                    if (value is double d)
+                    {
+                        var fmt = cell.Style.Numberformat.Format ?? string.Empty;
+                        var looksLikeDate = fmt.Contains('d', StringComparison.OrdinalIgnoreCase)
+                            || fmt.Contains('y', StringComparison.OrdinalIgnoreCase)
+                            || (d is > 25000 and < 80000);
+                        if (looksLikeDate)
+                        {
+                            try
+                            {
+                                return DateTime.FromOADate(d)
+                                    .ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
+                            }
+                            catch
+                            {
+                                // fall through to numeric/text handling
+                            }
+                        }
+
+                        // Prefer the stored numeric value (EPPlus Text can show scientific notation).
+                        if (double.IsFinite(d) && Math.Abs(d - Math.Round(d)) < 0.0000001)
+                            return ((long)Math.Round(d)).ToString(CultureInfo.InvariantCulture);
+
+                        return d.ToString(CultureInfo.InvariantCulture);
+                    }
+
+                    if (value is float or decimal or long or int)
+                        return Convert.ToString(value, CultureInfo.InvariantCulture)?.Trim() ?? string.Empty;
+
+                    if (!string.IsNullOrWhiteSpace(cell.Text))
+                        return cell.Text.Trim();
+
+                    return value?.ToString()?.Trim() ?? string.Empty;
                 }
 
-                // Excel template may contain two "Hub" columns: first -> hub_name, second -> branch_hub.
+                bool RowHasContent(int row, int maxColsToScan)
+                {
+                    for (var c = 1; c <= Math.Min(dimCols, maxColsToScan); c++)
+                    {
+                        if (!string.IsNullOrWhiteSpace(Cell(row, c)))
+                            return true;
+                    }
+
+                    return false;
+                }
+
+                DateTime? DateCell(int row, int? col)
+                {
+                    if (!col.HasValue) return null;
+                    var cell = ws.Cells[row, col.Value];
+                    if (cell.Value is DateTime dt) return dt;
+                    if (cell.Value is double d)
+                    {
+                        try
+                        {
+                            var parsed = DateTime.FromOADate(d);
+                            if (parsed.Year is >= 1900 and <= 2100)
+                                return parsed;
+                        }
+                        catch
+                        {
+                            // fall through
+                        }
+                    }
+
+                    return ParseDateTimeOrNull(Cell(row, col));
+                }
+
+                // Duplicate plain "Hub" headers: first -> hub_name, second -> branch_hub.
                 var hubColumns = new List<int>();
                 for (var c = 1; c <= headerLastCol; c++)
                 {
-                    var headerText = ws.Cells[1, c].Text;
+                    var headerText = Cell(1, c);
                     if (string.IsNullOrWhiteSpace(headerText)) break;
                     if (NormHeader(headerText) == "hub")
                         hubColumns.Add(c);
                 }
 
-                int? HubNameCol() => hubColumns.Count > 0 ? hubColumns[0] : Col("Hub", "HubName", "HUB");
-                int? BranchHubCol() => hubColumns.Count > 1 ? hubColumns[1] : Col("Branch Hub", "BranchHub");
+                int? HubNameCol() =>
+                    Col("Hub 1", "Hub1") ??
+                    (hubColumns.Count > 0 ? hubColumns[0] : (int?)null) ??
+                    Col("Hub", "HubName", "HUB");
+
+                int? BranchHubCol() =>
+                    Col("Hub 2", "Hub2") ??
+                    (hubColumns.Count > 1 ? hubColumns[1] : (int?)null) ??
+                    Col("Branch Hub", "BranchHub");
 
                 var queryStatusLookups = await _db.QueryStatusLookups.AsNoTracking()
                     .Where(x => x.IsActive)
@@ -374,17 +456,7 @@ public sealed class AdminService : IAdminService
                     var maxCols = headerLastCol > 0 ? headerLastCol : Math.Min(dimCols, 20);
                     for (var r = end; r >= 2; r--)
                     {
-                        var hasAny = false;
-                        for (var c = 1; c <= Math.Min(dimCols, maxCols); c++)
-                        {
-                            if (!string.IsNullOrWhiteSpace(ws.Cells[r, c].Text))
-                            {
-                                hasAny = true;
-                                break;
-                            }
-                        }
-
-                        if (hasAny)
+                        if (RowHasContent(r, maxCols))
                         {
                             lastDataRow = r;
                             break;
@@ -406,6 +478,7 @@ public sealed class AdminService : IAdminService
                 const int batchSize = 500;
                 var taskBatch = new List<TaskItem>(batchSize);
                 var errorBatch = new List<ExcelUploadError>(batchSize);
+                var seenInternalIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 var agentEmailCache = new Dictionary<string, long?>(StringComparer.OrdinalIgnoreCase);
 
                 async Task<long?> ResolveAgentIdByEmailAsync(string email)
@@ -461,14 +534,10 @@ public sealed class AdminService : IAdminService
                         var existingSet = existing.ToHashSet(StringComparer.OrdinalIgnoreCase);
                         foreach (var dup in taskBatch.Where(x => existingSet.Contains(x.InternalId)).ToList())
                         {
-                            upload.FailedRows++;
-                            errorBatch.Add(new ExcelUploadError
-                            {
-                                UploadId = upload.Id,
-                                ExcelRowNumber = 0,
-                                ErrorMessage = $"Duplicate InternalId already exists: {dup.InternalId}",
-                                RawData = dup.RawData
-                            });
+                            _logger.LogInformation(
+                                "UploadExcelAsync skipping duplicate InternalId already in DB. uploadId={UploadId} internalId={InternalId}",
+                                upload.Id,
+                                dup.InternalId);
                             taskBatch.Remove(dup);
                         }
                     }
@@ -587,23 +656,26 @@ public sealed class AdminService : IAdminService
                     try
                     {
                         // Header-based mapping (supports varying Excel formats).
+                        var customerName = Trunc(NullIfBlank(Cell(row, Col("Customer Name", "CustomerName"))), 255);
+                        if (customerName is null)
+                            continue;
+
                         var srNo = ParseIntOrNull(Cell(row, Col("Sr No", "SrNo", "Sr. No", "SR NO", "Sr_No")));
                         var hubName = Trunc(NullIfBlank(Cell(row, HubNameCol())), 100);
                         var appNo = Trunc(NullIfBlank(Cell(row, Col("Application Number", "ApplicationNo", "Application No", "Application"))), 100);
-                        var customerName = Trunc(NullIfBlank(Cell(row, Col("Customer Name", "CustomerName"))), 255);
-                        var entityName = Trunc(NullIfBlank(Cell(row, Col("Entity Name", "EntityName"))), 255);
+                        var entityName = Trunc(NullIfBlank(Cell(row, Col("Entity Name", "EntityName", "Entity"))), 255);
                         var loanType = Trunc(NullIfBlank(Cell(row, Col("Loan Type", "LoanType"))), 100);
                         var loanAmount = ParseDecimalOrNull(Cell(row, Col("Loan amount", "Loan Amount", "LoanAmount")));
                         var customerAddress = NullIfBlank(Cell(row, Col("Address", "Customer Address", "CustomerAddress")));
                         var location = Trunc(NullIfBlank(Cell(row, Col("Location"))), 255);
-                        var pinCode = Trunc(NullIfBlank(Cell(row, Col("Pin Code", "PinCode", "Pincode", "PIN"))), 45);
+                        var pinCode = Trunc(NullIfBlank(Cell(row, Col("Pin Code", "PinCode", "Pincode", "PIN", "Pin"))), 45);
                         var branchHub = Trunc(NullIfBlank(Cell(row, BranchHubCol())), 100);
                         var mobileNo = Trunc(NullIfBlank(Cell(row, Col("Mobile No", "MobileNo", "Mobile"))), 20);
-                        var visitDate = ParseDateTimeOrNull(Cell(row, Col("Visit date", "Visit Date", "VisitDate")));
-                        var pdDate = ParseDateTimeOrNull(Cell(row, Col("PD date", "PD Date", "PdDate", "PD Date")));
+                        var visitDate = DateCell(row, Col("Visit date", "Visit Date", "VisitDate"));
+                        var pdDate = DateCell(row, Col("PD date", "PD Date", "PdDate", "PD Date"));
                         var excelQueryStatus = NullIfBlank(Cell(row, Col("Status")));
                         var queryText = NullIfBlank(Cell(row, Col("Query")));
-                        var agentEmail = Trunc(NullIfBlank(Cell(row, Col("Agent Email", "AgentEmail"))), 150);
+                        var agentEmail = Trunc(NullIfBlank(Cell(row, Col("Agent Email", "AgentEmail", "Mail ID", "MailID", "Mail Id"))), 150);
 
                         // InternalId rules:
                         // - Prefer explicit InternalId column if present
@@ -622,33 +694,20 @@ public sealed class AdminService : IAdminService
                         // This avoids "failed records" while keeping uniqueness.
                         internalId ??= $"U{upload.Id:D6}R{row:D6}";
 
+                        if (!seenInternalIds.Add(internalId))
+                            continue;
+
                         long? resolvedAgentId = null;
                         if (!string.IsNullOrWhiteSpace(agentEmail))
                         {
                             resolvedAgentId = await ResolveAgentIdByEmailAsync(agentEmail);
                             if (!resolvedAgentId.HasValue)
                             {
-                                upload.FailedRows++;
-                                errorBatch.Add(new ExcelUploadError
-                                {
-                                    UploadId = upload.Id,
-                                    ExcelRowNumber = row,
-                                    ErrorMessage = $"Agent not found for email: {agentEmail}",
-                                    RawData = JsonSerializer.Serialize(new
-                                    {
-                                        row,
-                                        agentEmail,
-                                        internalId,
-                                        applicationNo = appNo,
-                                        customerName,
-                                        mobileNo
-                                    })
-                                });
-
-                                if (errorBatch.Count >= batchSize)
-                                    await FlushErrorsAsync();
-
-                                continue;
+                                _logger.LogWarning(
+                                    "UploadExcelAsync agent not found; importing without assignment. uploadId={UploadId} row={Row} email={Email}",
+                                    upload.Id,
+                                    row,
+                                    agentEmail);
                             }
                         }
 
@@ -659,77 +718,33 @@ public sealed class AdminService : IAdminService
                             queryStatusLookupId = ResolveQueryStatusId(excelQueryStatus);
                             if (!queryStatusLookupId.HasValue)
                             {
-                                upload.FailedRows++;
-                                errorBatch.Add(new ExcelUploadError
-                                {
-                                    UploadId = upload.Id,
-                                    ExcelRowNumber = row,
-                                    ErrorMessage = $"Unknown Status value (not in query_status_lookup): {excelQueryStatus}",
-                                    RawData = JsonSerializer.Serialize(new { row, excelQueryStatus, internalId, applicationNo = appNo })
-                                });
-
-                                if (errorBatch.Count >= batchSize)
-                                    await FlushErrorsAsync();
-
-                                continue;
-                            }
-
-                            var isOther = otherQueryStatusId.HasValue &&
-                                          queryStatusLookupId.Value == otherQueryStatusId.Value;
-                            if (isOther)
-                            {
-                                taskStatusOther = queryText;
-                                if (string.IsNullOrWhiteSpace(taskStatusOther))
-                                {
-                                    upload.FailedRows++;
-                                    errorBatch.Add(new ExcelUploadError
-                                    {
-                                        UploadId = upload.Id,
-                                        ExcelRowNumber = row,
-                                        ErrorMessage = "Query is required when Status is Other",
-                                        RawData = JsonSerializer.Serialize(new { row, excelQueryStatus, internalId })
-                                    });
-
-                                    if (errorBatch.Count >= batchSize)
-                                        await FlushErrorsAsync();
-
-                                    continue;
-                                }
-
-                                taskStatusOther = Trunc(taskStatusOther, 255);
-                            }
-                        }
-
-                        // Requirement: if Customer Name is blank, skip row (do not insert).
-                        if (customerName is null)
-                        {
-                            upload.FailedRows++;
-                            errorBatch.Add(new ExcelUploadError
-                            {
-                                UploadId = upload.Id,
-                                ExcelRowNumber = row,
-                                ErrorMessage = "Skipped row: Customer Name is blank",
-                                RawData = JsonSerializer.Serialize(new
-                                {
+                                _logger.LogWarning(
+                                    "UploadExcelAsync unknown Status value; importing without task_status. uploadId={UploadId} row={Row} status={Status}",
+                                    upload.Id,
                                     row,
-                                    a = ws.Cells[row, 1].Text,
-                                    b = ws.Cells[row, 2].Text,
-                                    c = ws.Cells[row, 3].Text,
-                                    d = ws.Cells[row, 4].Text,
-                                    e = ws.Cells[row, 5].Text,
-                                    f = ws.Cells[row, 6].Text,
-                                    g = ws.Cells[row, 7].Text,
-                                    h = ws.Cells[row, 8].Text,
-                                    i = ws.Cells[row, 9].Text,
-                                    j = ws.Cells[row, 10].Text,
-                                    k = ws.Cells[row, 11].Text
-                                })
-                            });
-
-                            if (errorBatch.Count >= batchSize)
-                                await FlushErrorsAsync();
-
-                            continue;
+                                    excelQueryStatus);
+                            }
+                            else
+                            {
+                                var isOther = otherQueryStatusId.HasValue &&
+                                              queryStatusLookupId.Value == otherQueryStatusId.Value;
+                                if (isOther)
+                                {
+                                    taskStatusOther = queryText;
+                                    if (string.IsNullOrWhiteSpace(taskStatusOther))
+                                    {
+                                        _logger.LogWarning(
+                                            "UploadExcelAsync Status is Other but Query is blank; importing without task_status_other. uploadId={UploadId} row={Row}",
+                                            upload.Id,
+                                            row);
+                                        taskStatusOther = null;
+                                    }
+                                    else
+                                    {
+                                        taskStatusOther = Trunc(taskStatusOther, 255);
+                                    }
+                                }
+                            }
                         }
 
                         var rawObj = new Dictionary<string, object?>
@@ -1046,6 +1061,9 @@ public sealed class AdminService : IAdminService
         if (request.DueDate.HasValue)
             task.DueDate = request.DueDate.Value.ToDateTime(TimeOnly.MinValue);
 
+        if (request.PdDate.HasValue)
+            task.PdDate = request.PdDate.Value.ToDateTime(TimeOnly.MinValue);
+
         task.UpdatedAt = now;
 
         try
@@ -1072,26 +1090,49 @@ public sealed class AdminService : IAdminService
 
             var baseMsg = ex.GetBaseException().Message;
 
-            if (request.Status.HasValue || request.DueDate.HasValue)
+            if (request.Status.HasValue || request.DueDate.HasValue || request.PdDate.HasValue)
             {
                 var dueDate = request.DueDate?.ToDateTime(TimeOnly.MinValue);
+                var pdDate = request.PdDate?.ToDateTime(TimeOnly.MinValue);
                 var mappedStatus = request.Status.HasValue ? MapToOpenInProgressClosed(request.Status.Value) : null;
 
                 async Task TryRawUpdateAsync(string statusColumn)
                 {
-                    if (mappedStatus is null && dueDate is null)
+                    if (mappedStatus is null && dueDate is null && pdDate is null)
                         return;
 
                     try
                     {
                         // Use parameters to avoid SQL injection.
-                        if (mappedStatus is not null && dueDate is not null)
+                        if (mappedStatus is not null && dueDate is not null && pdDate is not null)
+                        {
+#pragma warning disable EF1002
+                            await _db.Database.ExecuteSqlRawAsync(
+                                $"UPDATE `tasks` SET `updated_at` = @p0, `{statusColumn}` = @p1, `due_date` = @p2, `pd_date` = @p3 WHERE `id` = @p4;",
+                                now, mappedStatus, dueDate.Value, pdDate.Value, taskId, ct);
+#pragma warning restore EF1002
+                        }
+                        else if (mappedStatus is not null && dueDate is not null)
                         {
 #pragma warning disable EF1002
                             await _db.Database.ExecuteSqlRawAsync(
                                 $"UPDATE `tasks` SET `updated_at` = @p0, `{statusColumn}` = @p1, `due_date` = @p2 WHERE `id` = @p3;",
                                 now, mappedStatus, dueDate.Value, taskId, ct);
 #pragma warning restore EF1002
+                        }
+                        else if (mappedStatus is not null && pdDate is not null)
+                        {
+#pragma warning disable EF1002
+                            await _db.Database.ExecuteSqlRawAsync(
+                                $"UPDATE `tasks` SET `updated_at` = @p0, `{statusColumn}` = @p1, `pd_date` = @p2 WHERE `id` = @p3;",
+                                now, mappedStatus, pdDate.Value, taskId, ct);
+#pragma warning restore EF1002
+                        }
+                        else if (dueDate is not null && pdDate is not null)
+                        {
+                            await _db.Database.ExecuteSqlRawAsync(
+                                $"UPDATE `tasks` SET `updated_at` = @p0, `due_date` = @p1, `pd_date` = @p2 WHERE `id` = @p3;",
+                                now, dueDate.Value, pdDate.Value, taskId, ct);
                         }
                         else if (mappedStatus is not null)
                         {
@@ -1101,11 +1142,17 @@ public sealed class AdminService : IAdminService
                                 now, mappedStatus, taskId, ct);
 #pragma warning restore EF1002
                         }
-                        else
+                        else if (dueDate is not null)
                         {
                             await _db.Database.ExecuteSqlRawAsync(
                                 $"UPDATE `tasks` SET `updated_at` = @p0, `due_date` = @p1 WHERE `id` = @p2;",
-                                now, dueDate!.Value, taskId, ct);
+                                now, dueDate.Value, taskId, ct);
+                        }
+                        else if (pdDate is not null)
+                        {
+                            await _db.Database.ExecuteSqlRawAsync(
+                                $"UPDATE `tasks` SET `updated_at` = @p0, `pd_date` = @p1 WHERE `id` = @p2;",
+                                now, pdDate.Value, taskId, ct);
                         }
 
                         // If one of the columns exists and the value is valid, we are done.
@@ -1121,7 +1168,7 @@ public sealed class AdminService : IAdminService
             }
             else
             {
-                throw new AppException("Provide at least one field: status or dueDate.");
+                throw new AppException("Provide at least one field: status, dueDate, or pdDate.");
             }
 
             // If the raw update didn't work, bubble up the root cause for visibility.
