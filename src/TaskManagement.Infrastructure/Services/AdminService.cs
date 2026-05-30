@@ -1064,6 +1064,41 @@ public sealed class AdminService : IAdminService
         if (request.PdDate.HasValue)
             task.PdDate = request.PdDate.Value.ToDateTime(TimeOnly.MinValue);
 
+        if (request.PdStatusId.HasValue)
+        {
+            var pdStatusExists = await _db.StatusLookups.AsNoTracking()
+                .AnyAsync(x => x.StatusLookupId == request.PdStatusId.Value && x.IsActive, ct);
+            if (!pdStatusExists)
+                throw new AppException("Invalid pdStatusId. Choose an active value from status_lookup.", 400);
+
+            task.StatusLookupId = request.PdStatusId.Value;
+        }
+
+        if (request.TaskStatusId.HasValue)
+        {
+            var queryStatus = await _db.QueryStatusLookups.AsNoTracking()
+                .FirstOrDefaultAsync(x => x.QueryStatusLookupId == request.TaskStatusId.Value && x.IsActive, ct);
+            if (queryStatus is null)
+                throw new AppException("Invalid taskStatusId. Choose an active value from query_status_lookup.", 400);
+
+            var isOther = string.Equals(queryStatus.QueryStatusLookupName, "Other", StringComparison.OrdinalIgnoreCase);
+            if (isOther)
+            {
+                if (string.IsNullOrWhiteSpace(request.OtherText))
+                    throw new AppException("other_text is required when taskStatusId is Other.", 400);
+
+                task.TaskStatusOther = request.OtherText.Trim().Length <= 255
+                    ? request.OtherText.Trim()
+                    : request.OtherText.Trim()[..255];
+            }
+            else
+            {
+                task.TaskStatusOther = null;
+            }
+
+            task.QueryStatusLookupId = request.TaskStatusId.Value;
+        }
+
         task.UpdatedAt = now;
 
         try
@@ -1090,10 +1125,14 @@ public sealed class AdminService : IAdminService
 
             var baseMsg = ex.GetBaseException().Message;
 
-            if (request.Status.HasValue || request.DueDate.HasValue || request.PdDate.HasValue)
+            if (request.Status.HasValue || request.DueDate.HasValue || request.PdDate.HasValue ||
+                request.PdStatusId.HasValue || request.TaskStatusId.HasValue)
             {
                 var dueDate = request.DueDate?.ToDateTime(TimeOnly.MinValue);
                 var pdDate = request.PdDate?.ToDateTime(TimeOnly.MinValue);
+                var pdStatusId = request.PdStatusId;
+                var taskStatusId = request.TaskStatusId;
+                var taskStatusOther = string.IsNullOrWhiteSpace(request.OtherText) ? null : request.OtherText.Trim();
                 var mappedStatus = request.Status.HasValue ? MapToOpenInProgressClosed(request.Status.Value) : null;
 
                 async Task TryRawUpdateAsync(string statusColumn)
@@ -1165,10 +1204,47 @@ public sealed class AdminService : IAdminService
 
                 await TryRawUpdateAsync("current_status");
                 await TryRawUpdateAsync("status");
+
+                if (pdStatusId.HasValue)
+                {
+                    try
+                    {
+                        await _db.Database.ExecuteSqlRawAsync(
+                            "UPDATE `tasks` SET `updated_at` = @p0, `status` = @p1 WHERE `id` = @p2;",
+                            now, pdStatusId.Value, taskId, ct);
+                    }
+                    catch
+                    {
+                        // ignore; EF reload below will reflect whether update succeeded
+                    }
+                }
+
+                if (taskStatusId.HasValue)
+                {
+                    try
+                    {
+                        if (taskStatusOther is not null)
+                        {
+                            await _db.Database.ExecuteSqlRawAsync(
+                                "UPDATE `tasks` SET `updated_at` = @p0, `task_status` = @p1, `task_status_other` = @p2 WHERE `id` = @p3;",
+                                now, taskStatusId.Value, taskStatusOther, taskId, ct);
+                        }
+                        else
+                        {
+                            await _db.Database.ExecuteSqlRawAsync(
+                                "UPDATE `tasks` SET `updated_at` = @p0, `task_status` = @p1, `task_status_other` = NULL WHERE `id` = @p2;",
+                                now, taskStatusId.Value, taskId, ct);
+                        }
+                    }
+                    catch
+                    {
+                        // ignore; EF reload below will reflect whether update succeeded
+                    }
+                }
             }
             else
             {
-                throw new AppException("Provide at least one field: status, dueDate, or pdDate.");
+                throw new AppException("Provide at least one field: status, dueDate, pdDate, pdStatusId, or taskStatusId.");
             }
 
             // If the raw update didn't work, bubble up the root cause for visibility.
