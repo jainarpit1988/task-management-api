@@ -1547,17 +1547,14 @@ public sealed class AdminService : IAdminService
         var now = DateTime.UtcNow;
         var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
+        // Resolve tables before opening a transaction (schema checks must not close the connection mid-tx).
+        var tablesToArchive = await DataArchiveHelper.ResolveArchiveTablesAsync(_db, ct);
+
         await using var tx = await _db.Database.BeginTransactionAsync(ct);
         try
         {
-            foreach (var table in DataArchiveHelper.ArchiveTableNames)
-            {
+            foreach (var table in tablesToArchive)
                 counts[table] = await SoftDeleteTableAsync(table, now, ct);
-            }
-
-            var followupsTable = await DataArchiveHelper.ResolveTaskFollowupsTableNameAsync(_db, ct);
-            if (!counts.ContainsKey(followupsTable))
-                counts[followupsTable] = await SoftDeleteTableAsync(followupsTable, now, ct);
 
             await tx.CommitAsync(ct);
         }
@@ -1581,9 +1578,6 @@ public sealed class AdminService : IAdminService
 
     private async Task<int> SoftDeleteTableAsync(string table, DateTime archivedAtUtc, CancellationToken ct)
     {
-        if (!await DataArchiveHelper.TableExistsAsync(_db, table, ct))
-            return 0;
-
         var hasUpdatedAt = table is "tasks" or "excel_uploads";
         var sql = hasUpdatedAt
             ? $"UPDATE `{table}` SET `is_deleted` = 1, `updated_at` = @p0 WHERE `is_deleted` = 0"

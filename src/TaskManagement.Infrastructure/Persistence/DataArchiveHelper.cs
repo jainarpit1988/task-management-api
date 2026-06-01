@@ -1,4 +1,7 @@
+using System.Data;
+using System.Data.Common;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 
 namespace TaskManagement.Infrastructure.Persistence;
 
@@ -26,18 +29,42 @@ internal static class DataArchiveHelper
         return "task_updates";
     }
 
+    public static async Task<IReadOnlyList<string>> ResolveArchiveTablesAsync(DbContext db, CancellationToken ct)
+    {
+        var tables = new List<string>();
+        foreach (var table in ArchiveTableNames)
+        {
+            if (await TableExistsAsync(db, table, ct))
+                tables.Add(table);
+        }
+
+        var followupsTable = await ResolveTaskFollowupsTableNameAsync(db, ct);
+        if (await TableExistsAsync(db, followupsTable, ct) &&
+            !tables.Contains(followupsTable, StringComparer.OrdinalIgnoreCase))
+        {
+            tables.Add(followupsTable);
+        }
+
+        return tables;
+    }
+
     public static async Task<bool> TableExistsAsync(DbContext db, string tableName, CancellationToken ct)
     {
-        await db.Database.OpenConnectionAsync(ct);
+        var connection = db.Database.GetDbConnection();
+        var shouldClose = connection.State != ConnectionState.Open;
+        if (shouldClose)
+            await connection.OpenAsync(ct);
+
         try
         {
-            await using var cmd = db.Database.GetDbConnection().CreateCommand();
+            await using var cmd = connection.CreateCommand();
+            AttachCurrentTransaction(db, cmd);
             cmd.CommandText = """
-                                SELECT COUNT(*)
-                                FROM information_schema.TABLES
-                                WHERE TABLE_SCHEMA = DATABASE()
-                                  AND TABLE_NAME = @name
-                                """;
+                              SELECT COUNT(*)
+                              FROM information_schema.TABLES
+                              WHERE TABLE_SCHEMA = DATABASE()
+                                AND TABLE_NAME = @name
+                              """;
             var p = cmd.CreateParameter();
             p.ParameterName = "@name";
             p.Value = tableName;
@@ -47,7 +74,15 @@ internal static class DataArchiveHelper
         }
         finally
         {
-            try { await db.Database.CloseConnectionAsync(); } catch { /* ignore */ }
+            if (shouldClose)
+                await connection.CloseAsync();
         }
+    }
+
+    private static void AttachCurrentTransaction(DbContext db, DbCommand cmd)
+    {
+        var txn = db.Database.CurrentTransaction;
+        if (txn is not null)
+            cmd.Transaction = txn.GetDbTransaction();
     }
 }
