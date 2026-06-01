@@ -382,6 +382,30 @@ using (var scope = app.Services.CreateScope())
         }
     }
 
+    async Task EnsureSoftDeleteColumnsAsync()
+    {
+        var tables = new[]
+        {
+            "excel_upload_errors",
+            "excel_uploads",
+            "report_exports",
+            "task_acknowledgements",
+            "task_assignments",
+            "task_status_history",
+            "task_followups",
+            "task_updates",
+            "tasks"
+        };
+
+        foreach (var table in tables)
+        {
+            await EnsureColumnAsync(
+                table,
+                "is_deleted",
+                $"ALTER TABLE `{table}` ADD COLUMN `is_deleted` tinyint(1) NOT NULL DEFAULT 0;");
+        }
+    }
+
     async Task EnsureTaskUpdatesCompatibilityAsync()
     {
         try
@@ -430,7 +454,8 @@ using (var scope = app.Services.CreateScope())
                                                      `meeting_person_name`,
                                                      `meeting_person_mobile`,
                                                      `followup_date`,
-                                                     `created_at`
+                                                     `created_at`,
+                                                     `is_deleted`
                                                  FROM `task_followups`;
                                                  """);
 #pragma warning restore EF1002
@@ -457,6 +482,7 @@ using (var scope = app.Services.CreateScope())
     await EnsureExcelUploadStatusEnumHasQueuedAsync();
     await EnsureAutoIncrementAsync(table: "excel_uploads", idColumn: "id");
     await EnsureTaskCurrentStatusEnumIsCompatibleAsync();
+    await EnsureSoftDeleteColumnsAsync();
     await EnsureTaskUpdatesCompatibilityAsync();
 
     // Recovery: if the app recycles mid-processing, re-enqueue stuck uploads.

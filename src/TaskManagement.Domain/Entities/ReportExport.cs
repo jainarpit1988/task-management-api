@@ -2,9 +2,11 @@ using TaskManagement.Domain.Common;
 
 namespace TaskManagement.Domain.Entities;
 
-public class ReportExport : AuditableEntity
+public class ReportExport : AuditableEntity, ISoftDeletable
 {
     public long Id { get; set; }
+
+    public bool IsDeleted { get; set; }
 
     public string? FileName { get; set; }
     public string? FilePath { get; set; }

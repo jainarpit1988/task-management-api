@@ -3,9 +3,11 @@ using TaskManagement.Domain.Enums;
 
 namespace TaskManagement.Domain.Entities;
 
-public class TaskUpdate : AuditableEntity
+public class TaskUpdate : AuditableEntity, ISoftDeletable
 {
     public long Id { get; set; }
+
+    public bool IsDeleted { get; set; }
 
     public long TaskId { get; set; }
     public TaskItem Task { get; set; } = null!;

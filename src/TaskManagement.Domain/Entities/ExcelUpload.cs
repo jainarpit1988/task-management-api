@@ -3,9 +3,11 @@ using TaskManagement.Domain.Enums;
 
 namespace TaskManagement.Domain.Entities;
 
-public class ExcelUpload : AuditableEntity
+public class ExcelUpload : AuditableEntity, ISoftDeletable
 {
     public long Id { get; set; }
+
+    public bool IsDeleted { get; set; }
 
     public string? FileName { get; set; }
     public string? FilePath { get; set; }

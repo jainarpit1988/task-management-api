@@ -106,6 +106,17 @@ public sealed class AdminService : IAdminService
             fileName,
             fileBytes.Length);
 
+        var anotherProcessing = await _db.ExcelUploads.IgnoreQueryFilters()
+            .AnyAsync(x => !x.IsDeleted && x.Status == ExcelUploadStatus.PROCESSING, ct);
+        if (anotherProcessing)
+            throw new AppException("Another Excel upload is currently processing. Please wait and try again.", 409);
+
+        var archiveResult = await ArchiveOperationalDataAsync(ct);
+        _logger.LogInformation(
+            "EnqueueExcelUploadAsync archived existing data before upload. userId={UserId} counts={Counts}",
+            _currentUser.UserId,
+            string.Join(", ", archiveResult.ArchivedCounts.Select(kv => $"{kv.Key}={kv.Value}")));
+
         var upload = new ExcelUpload
         {
             FileName = fileName,
@@ -1327,7 +1338,7 @@ public sealed class AdminService : IAdminService
         CancellationToken ct)
     {
         // Base filtered tasks (soft-delete protected)
-        var q = _db.Tasks.AsNoTracking().Where(x => !x.IsDeleted);
+        var q = _db.Tasks.AsNoTracking();
 
         if (filter.AgentId.HasValue) q = q.Where(x => x.AssignedAgentId == filter.AgentId.Value);
         if (filter.Status.HasValue) q = q.Where(x => x.Status == filter.Status.Value);
@@ -1516,6 +1527,71 @@ public sealed class AdminService : IAdminService
 
         cell.Value = IndiaDateTime.FromUtcToIst(utcValue.Value);
         cell.Style.Numberformat.Format = "yyyy-mm-dd";
+    }
+
+    public async Task<ArchiveDataResultDto> ArchiveDataAsync(CancellationToken ct)
+    {
+        var hasActiveUploads = await _db.ExcelUploads.AsNoTracking()
+            .AnyAsync(x =>
+                x.Status == ExcelUploadStatus.QUEUED ||
+                x.Status == ExcelUploadStatus.PROCESSING, ct);
+
+        if (hasActiveUploads)
+            throw new AppException("Cannot archive while Excel uploads are queued or processing.", 409);
+
+        return await ArchiveOperationalDataAsync(ct);
+    }
+
+    private async Task<ArchiveDataResultDto> ArchiveOperationalDataAsync(CancellationToken ct)
+    {
+        var now = DateTime.UtcNow;
+        var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+        await using var tx = await _db.Database.BeginTransactionAsync(ct);
+        try
+        {
+            foreach (var table in DataArchiveHelper.ArchiveTableNames)
+            {
+                counts[table] = await SoftDeleteTableAsync(table, now, ct);
+            }
+
+            var followupsTable = await DataArchiveHelper.ResolveTaskFollowupsTableNameAsync(_db, ct);
+            if (!counts.ContainsKey(followupsTable))
+                counts[followupsTable] = await SoftDeleteTableAsync(followupsTable, now, ct);
+
+            await tx.CommitAsync(ct);
+        }
+        catch
+        {
+            await tx.RollbackAsync(ct);
+            throw;
+        }
+
+        _logger.LogWarning(
+            "ArchiveOperationalDataAsync completed by userId={UserId} counts={Counts}",
+            _currentUser.UserId,
+            string.Join(", ", counts.Select(kv => $"{kv.Key}={kv.Value}")));
+
+        return new ArchiveDataResultDto
+        {
+            ArchivedAtUtc = now,
+            ArchivedCounts = counts
+        };
+    }
+
+    private async Task<int> SoftDeleteTableAsync(string table, DateTime archivedAtUtc, CancellationToken ct)
+    {
+        if (!await DataArchiveHelper.TableExistsAsync(_db, table, ct))
+            return 0;
+
+        var hasUpdatedAt = table is "tasks" or "excel_uploads";
+        var sql = hasUpdatedAt
+            ? $"UPDATE `{table}` SET `is_deleted` = 1, `updated_at` = @p0 WHERE `is_deleted` = 0"
+            : $"UPDATE `{table}` SET `is_deleted` = 1 WHERE `is_deleted` = 0";
+
+        return hasUpdatedAt
+            ? await _db.Database.ExecuteSqlRawAsync(sql, archivedAtUtc, ct)
+            : await _db.Database.ExecuteSqlRawAsync(sql, ct);
     }
 
     public async Task<ExcelUploadHistoryDto> GetExcelUploadHistoryAsync(int page, int pageSize, CancellationToken ct)

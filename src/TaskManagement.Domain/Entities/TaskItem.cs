@@ -2,7 +2,7 @@ using TaskManagement.Domain.Common;
 
 namespace TaskManagement.Domain.Entities;
 
-public class TaskItem : AuditableEntity
+public class TaskItem : AuditableEntity, ISoftDeletable
 {
     public long Id { get; set; }
 

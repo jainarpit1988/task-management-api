@@ -2,9 +2,11 @@ using TaskManagement.Domain.Common;
 
 namespace TaskManagement.Domain.Entities;
 
-public class ExcelUploadError : AuditableEntity
+public class ExcelUploadError : AuditableEntity, ISoftDeletable
 {
     public long Id { get; set; }
+
+    public bool IsDeleted { get; set; }
 
     public long? UploadId { get; set; }
     public ExcelUpload? Upload { get; set; }

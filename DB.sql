@@ -59,6 +59,7 @@ CREATE TABLE excel_uploads (
     success_rows INT DEFAULT 0,
     failed_rows INT DEFAULT 0,
     status ENUM('PROCESSING', 'COMPLETED', 'FAILED') DEFAULT 'PROCESSING',
+    is_deleted TINYINT(1) DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     
     FOREIGN KEY (uploaded_by) REFERENCES users(id)
@@ -75,6 +76,7 @@ CREATE TABLE excel_upload_errors (
     
     error_message TEXT,
     raw_data JSON,
+    is_deleted TINYINT(1) DEFAULT 0,
     
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     
@@ -131,6 +133,7 @@ CREATE TABLE task_assignments (
     task_id BIGINT NOT NULL,
     agent_id BIGINT NOT NULL,
     assigned_by BIGINT,
+    is_deleted TINYINT(1) DEFAULT 0,
     assigned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     
     FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
@@ -147,6 +150,7 @@ CREATE TABLE task_acknowledgements (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     task_id BIGINT,
     agent_id BIGINT,
+    is_deleted TINYINT(1) DEFAULT 0,
     acknowledged_at DATETIME,
     
     FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
@@ -163,6 +167,7 @@ CREATE TABLE task_updates (
     
     task_id BIGINT NOT NULL,
     agent_id BIGINT NOT NULL,
+    is_deleted TINYINT(1) DEFAULT 0,
     
     status ENUM(
         'PENDING',
@@ -198,6 +203,7 @@ CREATE TABLE task_status_history (
     old_status VARCHAR(50),
     new_status VARCHAR(50),
     changed_by BIGINT,
+    is_deleted TINYINT(1) DEFAULT 0,
     changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     
     FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
@@ -212,6 +218,7 @@ CREATE TABLE report_exports (
     file_name VARCHAR(255),
     file_path VARCHAR(500),
     generated_by BIGINT,
+    is_deleted TINYINT(1) DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     
     FOREIGN KEY (generated_by) REFERENCES users(id)

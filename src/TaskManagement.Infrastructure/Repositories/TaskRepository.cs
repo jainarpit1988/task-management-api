@@ -22,7 +22,7 @@ public sealed class TaskRepository : ITaskRepository
                 .Include(x => x.Acknowledgements);
         }
 
-        return q.FirstOrDefaultAsync(x => x.Id == id && !x.IsDeleted, ct);
+        return q.FirstOrDefaultAsync(x => x.Id == id, ct);
     }
 
     public async Task<(IReadOnlyList<TaskItem> Items, long TotalCount)> ListAsync(
@@ -69,8 +69,6 @@ public sealed class TaskRepository : ITaskRepository
         TaskStatus? status,
         string? search)
     {
-        q = q.Where(x => !x.IsDeleted);
-
         if (agentId.HasValue) q = q.Where(x => x.AssignedAgentId == agentId.Value);
         if (status.HasValue) q = q.Where(x => x.Status == status.Value);
 
@@ -115,7 +113,7 @@ public sealed class TaskRepository : ITaskRepository
         if (pageSize <= 0) pageSize = 20;
 
         var q = _db.Tasks.AsNoTracking()
-            .Where(x => !x.IsDeleted && x.AssignedAgentId == agentId);
+            .Where(x => x.AssignedAgentId == agentId);
 
         if (status.HasValue) q = q.Where(x => x.Status == status.Value);
         if (acknowledged.HasValue) q = q.Where(x => x.Acknowledged == acknowledged.Value);
@@ -154,7 +152,7 @@ public sealed class TaskRepository : ITaskRepository
     public async Task<IReadOnlyList<TaskItem>> GetByIdsAsync(IEnumerable<long> ids, CancellationToken ct)
     {
         var idList = ids.Distinct().ToList();
-        var items = await _db.Tasks.Where(x => idList.Contains(x.Id) && !x.IsDeleted).ToListAsync(ct);
+        var items = await _db.Tasks.Where(x => idList.Contains(x.Id)).ToListAsync(ct);
         return items;
     }
 

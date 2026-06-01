@@ -2,9 +2,11 @@ using TaskManagement.Domain.Common;
 
 namespace TaskManagement.Domain.Entities;
 
-public class TaskAssignment : AuditableEntity
+public class TaskAssignment : AuditableEntity, ISoftDeletable
 {
     public long Id { get; set; }
+
+    public bool IsDeleted { get; set; }
 
     public long TaskId { get; set; }
     public TaskItem Task { get; set; } = null!;

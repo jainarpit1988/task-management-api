@@ -17,6 +17,7 @@ public sealed class AppDbContext : DbContext
     public DbSet<ExcelUpload> ExcelUploads => Set<ExcelUpload>();
     public DbSet<ExcelUploadError> ExcelUploadErrors => Set<ExcelUploadError>();
     public DbSet<ReportExport> ReportExports => Set<ReportExport>();
+    public DbSet<TaskStatusHistory> TaskStatusHistories => Set<TaskStatusHistory>();
     public DbSet<QueryStatusLookup> QueryStatusLookups => Set<QueryStatusLookup>();
     public DbSet<StatusLookup> StatusLookups => Set<StatusLookup>();
 
@@ -161,6 +162,7 @@ public sealed class AppDbContext : DbContext
             e.Property(x => x.MeetingPersonName).HasColumnName("meeting_person_name").HasMaxLength(255);
 
             e.Property(x => x.CreatedAt).HasColumnName("created_at");
+            e.Property(x => x.IsDeleted).HasColumnName("is_deleted");
             // DB.sql table has no updated_at column; some envs may, but it's not required.
             e.Ignore(x => x.UpdatedAt);
 
@@ -193,6 +195,7 @@ public sealed class AppDbContext : DbContext
             e.Property(x => x.AssignedBy).HasColumnName("assigned_by");
             // New schema column is assigned_date (not assigned_at)
             e.Property(x => x.AssignedAt).HasColumnName("assigned_date");
+            e.Property(x => x.IsDeleted).HasColumnName("is_deleted");
             e.Property(x => x.CreatedAt).HasColumnName("created_at");
             // DB table has no updated_at column
             e.Ignore(x => x.UpdatedAt);
@@ -221,6 +224,7 @@ public sealed class AppDbContext : DbContext
             e.Property(x => x.TaskId).HasColumnName("task_id");
             e.Property(x => x.AgentId).HasColumnName("agent_id");
             e.Property(x => x.AcknowledgedAt).HasColumnName("acknowledged_at");
+            e.Property(x => x.IsDeleted).HasColumnName("is_deleted");
             e.Property(x => x.CreatedAt).HasColumnName("created_at");
             // DB table has no updated_at column
             e.Ignore(x => x.UpdatedAt);
@@ -249,6 +253,7 @@ public sealed class AppDbContext : DbContext
             e.Property(x => x.FailedRows).HasColumnName("failed_rows");
             // Production schema stores status as ENUM strings.
             e.Property(x => x.Status).HasColumnName("status").HasConversion<string>().IsRequired();
+            e.Property(x => x.IsDeleted).HasColumnName("is_deleted");
             e.Property(x => x.CreatedAt).HasColumnName("created_at");
             e.Property(x => x.UpdatedAt).HasColumnName("updated_at");
 
@@ -267,6 +272,7 @@ public sealed class AppDbContext : DbContext
             e.Property(x => x.ExcelRowNumber).HasColumnName("excel_row_number");
             e.Property(x => x.ErrorMessage).HasColumnName("error_message").IsRequired();
             e.Property(x => x.RawData).HasColumnName("raw_data").HasColumnType("json");
+            e.Property(x => x.IsDeleted).HasColumnName("is_deleted");
             e.Property(x => x.CreatedAt).HasColumnName("created_at");
             // DB table has no updated_at column
             e.Ignore(x => x.UpdatedAt);
@@ -275,6 +281,29 @@ public sealed class AppDbContext : DbContext
                 .WithMany(u => u.Errors)
                 .HasForeignKey(x => x.UploadId)
                 .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<TaskStatusHistory>(e =>
+        {
+            e.ToTable("task_status_history");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id");
+            e.Property(x => x.TaskId).HasColumnName("task_id");
+            e.Property(x => x.OldStatus).HasColumnName("old_status").HasMaxLength(50);
+            e.Property(x => x.NewStatus).HasColumnName("new_status").HasMaxLength(50);
+            e.Property(x => x.ChangedBy).HasColumnName("changed_by");
+            e.Property(x => x.ChangedAt).HasColumnName("changed_at");
+            e.Property(x => x.IsDeleted).HasColumnName("is_deleted");
+
+            e.HasOne(x => x.Task)
+                .WithMany()
+                .HasForeignKey(x => x.TaskId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            e.HasOne(x => x.ChangedByUser)
+                .WithMany()
+                .HasForeignKey(x => x.ChangedBy)
+                .OnDelete(DeleteBehavior.Restrict);
         });
 
         modelBuilder.Entity<QueryStatusLookup>(e =>
@@ -307,6 +336,7 @@ public sealed class AppDbContext : DbContext
             e.Property(x => x.FileName).HasColumnName("file_name").HasMaxLength(255);
             e.Property(x => x.FilePath).HasColumnName("file_path").HasMaxLength(500);
             e.Property(x => x.GeneratedBy).HasColumnName("generated_by");
+            e.Property(x => x.IsDeleted).HasColumnName("is_deleted");
             e.Property(x => x.CreatedAt).HasColumnName("created_at");
             // DB table has no updated_at column
             e.Ignore(x => x.UpdatedAt);
@@ -317,6 +347,7 @@ public sealed class AppDbContext : DbContext
                 .OnDelete(DeleteBehavior.Restrict);
         });
 
+        SoftDeleteQueryFilter.Apply(modelBuilder);
         ApplyUtcDateTimeConverters(modelBuilder);
     }
 

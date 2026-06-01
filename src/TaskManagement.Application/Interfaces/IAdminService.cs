@@ -34,6 +34,8 @@ public interface IAdminService
 
     Task<(byte[] FileBytes, string FileName)> ExportReportsToExcelAsync(TaskFilterDto filter, CancellationToken ct);
 
+    Task<ArchiveDataResultDto> ArchiveDataAsync(CancellationToken ct);
+
     Task<ExcelUploadHistoryDto> GetExcelUploadHistoryAsync(int page, int pageSize, CancellationToken ct);
     Task<ExcelUploadDetailsDto> GetExcelUploadDetailsAsync(long uploadId, int recentErrors = 50, CancellationToken ct = default);
 }

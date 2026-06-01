@@ -197,6 +197,14 @@ public sealed class AdminController : ControllerBase
         return Ok(ApiResponse<object>.Ok(new { tasksPerAgent, statusSummary }));
     }
 
+    [HttpPost("archive")]
+    [ProducesResponseType(typeof(ApiResponse<ArchiveDataResultDto>), StatusCodes.Status200OK)]
+    public async Task<ActionResult<ApiResponse<ArchiveDataResultDto>>> ArchiveData(CancellationToken ct)
+    {
+        var result = await _admin.ArchiveDataAsync(ct);
+        return Ok(ApiResponse<ArchiveDataResultDto>.Ok(result, "Data archived"));
+    }
+
     [HttpGet("export")]
     public async Task<IActionResult> Export(
         [FromQuery] long? agent_id,
