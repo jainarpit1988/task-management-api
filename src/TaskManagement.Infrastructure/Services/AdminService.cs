@@ -106,10 +106,41 @@ public sealed class AdminService : IAdminService
             fileName,
             fileBytes.Length);
 
-        var anotherProcessing = await _db.ExcelUploads.IgnoreQueryFilters()
-            .AnyAsync(x => !x.IsDeleted && x.Status == ExcelUploadStatus.PROCESSING, ct);
-        if (anotherProcessing)
-            throw new AppException("Another Excel upload is currently processing. Please wait and try again.", 409);
+        // If a prior upload is truly in progress, block. If it's stale (worker crashed / app recycled),
+        // mark it FAILED so admin can upload again.
+        var processing = await _db.ExcelUploads.IgnoreQueryFilters()
+            .Where(x => !x.IsDeleted && x.Status == ExcelUploadStatus.PROCESSING)
+            .OrderByDescending(x => x.Id)
+            .Select(x => new { x.Id, x.CreatedAt, x.UpdatedAt })
+            .Take(3)
+            .ToListAsync(ct);
+
+        if (processing.Count > 0)
+        {
+            var now = DateTime.UtcNow;
+            var staleCutoff = now.AddMinutes(-15);
+
+            var staleIds = processing
+                .Where(x => (x.UpdatedAt == default ? x.CreatedAt : x.UpdatedAt) <= staleCutoff)
+                .Select(x => x.Id)
+                .ToList();
+
+            if (staleIds.Count > 0)
+            {
+                _logger.LogWarning(
+                    "EnqueueExcelUploadAsync found stale PROCESSING uploads; marking FAILED. ids={Ids}",
+                    string.Join(",", staleIds));
+
+                // NOTE: updated_at exists in most envs; startup schema guard adds it if missing.
+                var idListSql = string.Join(",", staleIds);
+                var sql = $"UPDATE `excel_uploads` SET `status` = 'FAILED', `updated_at` = @p0 WHERE `id` IN ({idListSql})";
+                await _db.Database.ExecuteSqlRawAsync(sql, [now], ct);
+            }
+            else
+            {
+                throw new AppException("Another Excel upload is currently processing. Please wait and try again.", 409);
+            }
+        }
 
         var archiveResult = await ArchiveOperationalDataAsync(ct);
         _logger.LogInformation(
@@ -694,22 +725,10 @@ public sealed class AdminService : IAdminService
                         var queryText = NullIfBlank(Cell(row, Col("Query")));
                         var agentEmail = Trunc(NullIfBlank(Cell(row, Col("Agent Email", "AgentEmail", "Mail ID", "MailID", "Mail Id"))), 150);
 
-                        // InternalId rules:
-                        // - Prefer explicit InternalId column if present
-                        // - Else fall back to Application Number (usually unique)
-                        // - Else fall back to Sr No
-                        // - Else generate stable fallback
-                        var internalId =
-                            NullIfBlank(Cell(row, Col("InternalId", "Internal Id", "Internal"))) ??
-                            appNo ??
-                            (srNo.HasValue ? srNo.Value.ToString() : null);
-
-                        if (internalId is not null && internalId.Length > 50)
-                            internalId = internalId[..50];
-
-                        // If InternalId is missing, generate a stable fallback so row can still be inserted.
-                        // This avoids "failed records" while keeping uniqueness.
-                        internalId ??= $"U{upload.Id:D6}R{row:D6}";
+                        // Always generate a unique InternalId per upload-row.
+                        // This prevents duplicate-key failures when the same file/data is uploaded multiple times.
+                        // Keep it short and deterministic: "U000123R000045" (<= 50 chars).
+                        var internalId = $"U{upload.Id:D6}R{row:D6}";
 
                         if (!seenInternalIds.Add(internalId))
                             continue;
@@ -1584,8 +1603,8 @@ public sealed class AdminService : IAdminService
             : $"UPDATE `{table}` SET `is_deleted` = 1 WHERE `is_deleted` = 0";
 
         return hasUpdatedAt
-            ? await _db.Database.ExecuteSqlRawAsync(sql, archivedAtUtc, ct)
-            : await _db.Database.ExecuteSqlRawAsync(sql, ct);
+            ? await _db.Database.ExecuteSqlRawAsync(sql, [archivedAtUtc], ct)
+            : await _db.Database.ExecuteSqlRawAsync(sql, cancellationToken: ct);
     }
 
     public async Task<ExcelUploadHistoryDto> GetExcelUploadHistoryAsync(int page, int pageSize, CancellationToken ct)

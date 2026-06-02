@@ -382,6 +382,25 @@ using (var scope = app.Services.CreateScope())
         }
     }
 
+    async Task<string?> GetTableTypeAsync(string tableName)
+    {
+        await using var cmd = db.Database.GetDbConnection().CreateCommand();
+        cmd.CommandType = CommandType.Text;
+        cmd.CommandText = """
+                          SELECT TABLE_TYPE
+                          FROM information_schema.TABLES
+                          WHERE TABLE_SCHEMA = DATABASE()
+                            AND TABLE_NAME = @name
+                          LIMIT 1
+                          """;
+        var p = cmd.CreateParameter();
+        p.ParameterName = "@name";
+        p.Value = tableName;
+        cmd.Parameters.Add(p);
+        var scalar = await cmd.ExecuteScalarAsync();
+        return scalar?.ToString();
+    }
+
     async Task EnsureSoftDeleteColumnsAsync()
     {
         var tables = new[]
@@ -397,8 +416,30 @@ using (var scope = app.Services.CreateScope())
             "tasks"
         };
 
+        string? taskUpdatesType = null;
+        try
+        {
+            await db.Database.OpenConnectionAsync();
+            taskUpdatesType = await GetTableTypeAsync("task_updates");
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Failed reading table type for task_updates");
+        }
+        finally
+        {
+            try { await db.Database.CloseConnectionAsync(); } catch { /* ignore */ }
+        }
+
         foreach (var table in tables)
         {
+            // task_updates is often a VIEW over task_followups; ALTER VIEW is invalid — refresh the view instead.
+            if (table == "task_updates" &&
+                string.Equals(taskUpdatesType, "VIEW", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
             await EnsureColumnAsync(
                 table,
                 "is_deleted",
@@ -414,34 +455,16 @@ using (var scope = app.Services.CreateScope())
 
             async Task<bool> TableOrViewExistsAsync(string name)
             {
-                await using var cmd = db.Database.GetDbConnection().CreateCommand();
-                cmd.CommandType = CommandType.Text;
-                cmd.CommandText = """
-                                  SELECT COUNT(*)
-                                  FROM information_schema.TABLES
-                                  WHERE TABLE_SCHEMA = DATABASE()
-                                    AND TABLE_NAME = @name
-                                  """;
-                var p = cmd.CreateParameter();
-                p.ParameterName = "@name";
-                p.Value = name;
-                cmd.Parameters.Add(p);
-                var scalar = await cmd.ExecuteScalarAsync();
-                return Convert.ToInt64(scalar) > 0;
+                return !string.IsNullOrEmpty(await GetTableTypeAsync(name));
             }
-
-            var hasTaskUpdates = await TableOrViewExistsAsync("task_updates");
-            if (hasTaskUpdates)
-                return;
 
             var hasTaskFollowups = await TableOrViewExistsAsync("task_followups");
             if (!hasTaskFollowups)
                 return;
 
-            logger.LogWarning("DB schema drift detected. Creating view task_updates over task_followups for compatibility.");
+            // Always refresh the view so new columns (e.g. is_deleted) are visible to EF.
+            logger.LogInformation("Ensuring task_updates view is synced with task_followups (includes is_deleted).");
 
-            // Create an updatable view so EF (mapped to task_updates) can read/write.
-            // Map: comments -> comment
 #pragma warning disable EF1002
             await db.Database.ExecuteSqlRawAsync("""
                                                  CREATE OR REPLACE VIEW `task_updates` AS
@@ -460,7 +483,7 @@ using (var scope = app.Services.CreateScope())
                                                  """);
 #pragma warning restore EF1002
 
-            logger.LogInformation("Created view task_updates for compatibility");
+            logger.LogInformation("Synced task_updates view for compatibility");
         }
         catch (Exception ex)
         {
