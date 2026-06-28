@@ -36,6 +36,7 @@ public interface ITaskRepository
         CancellationToken ct);
 
     Task<IReadOnlyList<TaskItem>> GetByIdsAsync(IEnumerable<long> ids, CancellationToken ct);
+    Task<bool> TrySelfAssignAsync(long taskId, long agentId, CancellationToken ct);
     Task AddRangeAsync(IEnumerable<TaskItem> tasks, CancellationToken ct);
     Task SaveChangesAsync(CancellationToken ct);
 }

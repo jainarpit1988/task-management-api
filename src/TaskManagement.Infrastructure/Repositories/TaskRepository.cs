@@ -112,8 +112,7 @@ public sealed class TaskRepository : ITaskRepository
         if (page <= 0) page = 1;
         if (pageSize <= 0) pageSize = 20;
 
-        var q = _db.Tasks.AsNoTracking()
-            .Where(x => x.AssignedAgentId == agentId);
+        var q = _db.Tasks.AsNoTracking();
 
         if (status.HasValue) q = q.Where(x => x.Status == status.Value);
         if (acknowledged.HasValue) q = q.Where(x => x.Acknowledged == acknowledged.Value);
@@ -154,6 +153,28 @@ public sealed class TaskRepository : ITaskRepository
         var idList = ids.Distinct().ToList();
         var items = await _db.Tasks.Where(x => idList.Contains(x.Id)).ToListAsync(ct);
         return items;
+    }
+
+    public async Task<bool> TrySelfAssignAsync(long taskId, long agentId, CancellationToken ct)
+    {
+        var now = DateTime.UtcNow;
+        var rows = await _db.Database.ExecuteSqlRawAsync(
+            "UPDATE `tasks` SET `current_agent_id` = @p0, `updated_at` = @p1 WHERE `id` = @p2 AND `current_agent_id` IS NULL AND `is_deleted` = 0",
+            [agentId, now, taskId],
+            ct);
+
+        if (rows == 0)
+            return false;
+
+        await _db.TaskAssignments.AddAsync(new TaskAssignment
+        {
+            TaskId = taskId,
+            AgentId = agentId,
+            AssignedBy = agentId,
+            AssignedAt = now
+        }, ct);
+        await _db.SaveChangesAsync(ct);
+        return true;
     }
 
     public async Task AddRangeAsync(IEnumerable<TaskItem> tasks, CancellationToken ct)

@@ -527,22 +527,6 @@ public sealed class AdminService : IAdminService
                 var taskBatch = new List<TaskItem>(batchSize);
                 var errorBatch = new List<ExcelUploadError>(batchSize);
                 var seenInternalIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                var agentEmailCache = new Dictionary<string, long?>(StringComparer.OrdinalIgnoreCase);
-
-                async Task<long?> ResolveAgentIdByEmailAsync(string email)
-                {
-                    if (string.IsNullOrWhiteSpace(email)) return null;
-                    var normalized = email.Trim();
-                    if (agentEmailCache.TryGetValue(normalized, out var cached)) return cached;
-
-                    var id = await _db.Users.AsNoTracking()
-                        .Where(u => !u.IsDeleted && u.Role == UserRole.AGENT && u.Email != null && u.Email == normalized)
-                        .Select(u => (long?)u.Id)
-                        .FirstOrDefaultAsync(ct);
-
-                    agentEmailCache[normalized] = id;
-                    return id;
-                }
 
                 async Task FlushErrorsAsync()
                 {
@@ -603,22 +587,6 @@ public sealed class AdminService : IAdminService
                             {
                                 await _tasks.AddRangeAsync(taskBatch, innerCt);
                                 await _tasks.SaveChangesAsync(innerCt);
-
-                                var assigned = taskBatch.Where(t => t.AssignedAgentId.HasValue).ToList();
-                                if (assigned.Count > 0)
-                                {
-                                    var assignedAt = DateTime.UtcNow;
-                                    var rows = assigned.Select(t => new TaskAssignment
-                                    {
-                                        TaskId = t.Id,
-                                        AgentId = t.AssignedAgentId!.Value,
-                                        AssignedBy = upload.UploadedBy,
-                                        AssignedAt = assignedAt
-                                    }).ToList();
-
-                                    await _assignments.AddRangeAsync(rows, innerCt);
-                                    await _tasks.SaveChangesAsync(innerCt);
-                                }
                             },
                             _logger,
                             op: "save_task_batch",
@@ -661,18 +629,6 @@ public sealed class AdminService : IAdminService
                                     StripNavigations(t);
                                         await _db.Tasks.AddAsync(t, innerCt);
                                         await _db.SaveChangesAsync(innerCt);
-
-                                        if (t.AssignedAgentId.HasValue)
-                                        {
-                                            await _db.TaskAssignments.AddAsync(new TaskAssignment
-                                            {
-                                                TaskId = t.Id,
-                                                AgentId = t.AssignedAgentId.Value,
-                                                AssignedBy = upload.UploadedBy,
-                                                AssignedAt = DateTime.UtcNow
-                                            }, innerCt);
-                                            await _db.SaveChangesAsync(innerCt);
-                                        }
                                     },
                                     _logger,
                                     op: "save_task_row",
@@ -732,20 +688,6 @@ public sealed class AdminService : IAdminService
 
                         if (!seenInternalIds.Add(internalId))
                             continue;
-
-                        long? resolvedAgentId = null;
-                        if (!string.IsNullOrWhiteSpace(agentEmail))
-                        {
-                            resolvedAgentId = await ResolveAgentIdByEmailAsync(agentEmail);
-                            if (!resolvedAgentId.HasValue)
-                            {
-                                _logger.LogWarning(
-                                    "UploadExcelAsync agent not found; importing without assignment. uploadId={UploadId} row={Row} email={Email}",
-                                    upload.Id,
-                                    row,
-                                    agentEmail);
-                            }
-                        }
 
                         long? queryStatusLookupId = null;
                         string? taskStatusOther = null;
@@ -827,7 +769,6 @@ public sealed class AdminService : IAdminService
                             QueryStatusLookupId = queryStatusLookupId,
                             TaskStatusOther = taskStatusOther,
                             StatusLookupId = defaultStatusLookupId == 0 ? null : defaultStatusLookupId,
-                            AssignedAgentId = resolvedAgentId,
                             Status = TaskStatus.NEW,
                             RawData = JsonSerializer.Serialize(rawObj),
                             CreatedFromUploadId = upload.Id
@@ -1071,11 +1012,11 @@ public sealed class AdminService : IAdminService
 
     public async Task<TaskDetailsDto> GetTaskDetailsForCallerAsync(long taskId, CancellationToken ct)
     {
+        if (_currentUser.Role == UserRole.AGENT)
+            await _tasks.TrySelfAssignAsync(taskId, _currentUser.UserId, ct);
+
         var task = await _tasks.GetByIdAsync(taskId, includeDetails: true, ct)
                    ?? throw new NotFoundException("Task not found");
-
-        if (_currentUser.Role == UserRole.AGENT && task.AssignedAgentId != _currentUser.UserId)
-            throw new ForbiddenException("You cannot access tasks assigned to other agents");
 
         return _mapper.Map<TaskDetailsDto>(task);
     }
@@ -1085,8 +1026,7 @@ public sealed class AdminService : IAdminService
         var task = await _tasks.GetByIdAsync(taskId, includeDetails: false, ct)
                    ?? throw new NotFoundException("Task not found");
 
-        if (_currentUser.Role == UserRole.AGENT && task.AssignedAgentId != _currentUser.UserId)
-            throw new ForbiddenException("You cannot update tasks assigned to other agents");
+        await EnsureAgentCanModifyTaskAsync(taskId, ct);
 
         var update = new TaskUpdate
         {
@@ -1130,9 +1070,7 @@ public sealed class AdminService : IAdminService
         var task = await _tasks.GetByIdAsync(taskId, includeDetails: false, ct)
                    ?? throw new NotFoundException("Task not found");
 
-        // Allow ADMIN to update any task; AGENT can update only tasks assigned to them.
-        if (_currentUser.Role == UserRole.AGENT && task.AssignedAgentId != _currentUser.UserId)
-            throw new ForbiddenException("You cannot update tasks assigned to other agents");
+        await EnsureAgentCanModifyTaskAsync(taskId, ct);
 
         var now = DateTime.UtcNow;
 
@@ -1546,6 +1484,24 @@ public sealed class AdminService : IAdminService
 
         cell.Value = IndiaDateTime.FromUtcToIst(utcValue.Value);
         cell.Style.Numberformat.Format = "yyyy-mm-dd";
+    }
+
+    private async Task EnsureAgentCanModifyTaskAsync(long taskId, CancellationToken ct)
+    {
+        if (_currentUser.Role != UserRole.AGENT)
+            return;
+
+        var current = await _tasks.GetByIdAsync(taskId, includeDetails: false, ct)
+                      ?? throw new NotFoundException("Task not found");
+
+        if (!current.AssignedAgentId.HasValue)
+            await _tasks.TrySelfAssignAsync(taskId, _currentUser.UserId, ct);
+
+        current = await _tasks.GetByIdAsync(taskId, includeDetails: false, ct)
+                  ?? throw new NotFoundException("Task not found");
+
+        if (current.AssignedAgentId != _currentUser.UserId)
+            throw new ForbiddenException("This task is assigned to another agent.");
     }
 
     public async Task<ArchiveDataResultDto> ArchiveDataAsync(CancellationToken ct)

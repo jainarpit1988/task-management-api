@@ -114,10 +114,10 @@ public sealed class AgentService : IAgentService
 
     public async Task AcknowledgeTaskAsync(long taskId, AcknowledgeTaskRequestDto request, CancellationToken ct)
     {
+        await EnsureAgentCanModifyTaskAsync(taskId, ct);
+
         var task = await _tasks.GetByIdAsync(taskId, includeDetails: false, ct)
                    ?? throw new NotFoundException("Task not found");
-
-        EnsureOwnTask(task);
 
         if (await _acks.ExistsAsync(taskId, _currentUser.UserId, ct))
             throw new AppException("Task already acknowledged");
@@ -140,10 +140,10 @@ public sealed class AgentService : IAgentService
 
     public async Task<TaskUpdateDto> AddUpdateAsync(long taskId, AddTaskUpdateRequestDto request, CancellationToken ct)
     {
+        await EnsureAgentCanModifyTaskAsync(taskId, ct);
+
         var task = await _tasks.GetByIdAsync(taskId, includeDetails: false, ct)
                    ?? throw new NotFoundException("Task not found");
-
-        EnsureOwnTask(task);
 
         var update = new TaskUpdate
         {
@@ -177,18 +177,27 @@ public sealed class AgentService : IAgentService
 
     public async Task<TaskDetailsDto> GetTaskHistoryAsync(long taskId, CancellationToken ct)
     {
+        await _tasks.TrySelfAssignAsync(taskId, _currentUser.UserId, ct);
+
         var task = await _tasks.GetByIdAsync(taskId, includeDetails: true, ct)
                    ?? throw new NotFoundException("Task not found");
-
-        EnsureOwnTask(task);
 
         return _mapper.Map<TaskDetailsDto>(task);
     }
 
-    private void EnsureOwnTask(TaskItem task)
+    private async Task EnsureAgentCanModifyTaskAsync(long taskId, CancellationToken ct)
     {
-        if (task.AssignedAgentId != _currentUser.UserId)
-            throw new ForbiddenException("You cannot access tasks assigned to other agents");
+        var current = await _tasks.GetByIdAsync(taskId, includeDetails: false, ct)
+                      ?? throw new NotFoundException("Task not found");
+
+        if (!current.AssignedAgentId.HasValue)
+            await _tasks.TrySelfAssignAsync(taskId, _currentUser.UserId, ct);
+
+        current = await _tasks.GetByIdAsync(taskId, includeDetails: false, ct)
+                  ?? throw new NotFoundException("Task not found");
+
+        if (current.AssignedAgentId != _currentUser.UserId)
+            throw new ForbiddenException("This task is assigned to another agent.");
     }
 }
 
